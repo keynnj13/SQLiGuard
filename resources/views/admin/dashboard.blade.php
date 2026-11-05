@@ -15,6 +15,15 @@
         <div class="col-md-6">
             <div class="card h-100">
                 <div class="card-body">
+                    <h2 class="h5 card-title">Demonstrations</h2>
+                    <p class="card-text">Run the tautology, UNION and comment-based injection comparisons used in class.</p>
+                    <a href="{{ route('demonstrations.index') }}" class="btn btn-primary">Open demonstrations</a>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-6">
+            <div class="card h-100">
+                <div class="card-body">
                     <h2 class="h5 card-title">Summaries</h2>
                     <p class="card-text text-body-secondary mb-0">
                         Test records, Vulnerable Mode settings and dashboard summaries will be added in a later phase.

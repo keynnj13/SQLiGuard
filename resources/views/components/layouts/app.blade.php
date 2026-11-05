@@ -27,6 +27,11 @@
                                    @if (request()->routeIs($dashboardRoute)) aria-current="page" @endif
                                    href="{{ route($dashboardRoute) }}">Dashboard</a>
                             </li>
+                            <li class="nav-item">
+                                <a class="nav-link @if (request()->routeIs('demonstrations.*')) active @endif"
+                                   @if (request()->routeIs('demonstrations.*')) aria-current="page" @endif
+                                   href="{{ route('demonstrations.index') }}">Demonstrations</a>
+                            </li>
                             @can('viewAny', App\Models\User::class)
                                 <li class="nav-item">
                                     <a class="nav-link @if (request()->routeIs('admin.users.*')) active @endif"

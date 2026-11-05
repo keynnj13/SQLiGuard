@@ -1,9 +1,10 @@
 {{--
-    Vulnerable Mode may only ever be available in the local environment, so the
-    warning is shown whenever the app runs locally. When the administrator
-    toggle is added, this condition must stay at least this strict.
+    Shown whenever Vulnerable Mode is available. It uses the same check as the
+    server-side enforcement (App\Demonstrations\VulnerableMode), which only
+    allows the `local` environment. When the administrator toggle is added,
+    this condition must stay at least this strict.
 --}}
-@if (app()->environment('local'))
+@if (App\Demonstrations\VulnerableMode::isAvailable())
     <div class="alert alert-warning border-0 border-bottom border-warning rounded-0 mb-0" role="alert">
         <div class="container">
             <strong>Lab environment warning:</strong>

@@ -23,14 +23,28 @@ SQLiGuard is a fourth-year BSIT project: a web input security demonstrator compa
 - Never grant `sqliguard_lab` write, TRUNCATE, TEMP or DDL privileges, any access to schema `public`, or default privileges. Never weaken permissions to make a demonstration work. Any permission change needs an explanation and the user's approval first.
 - Demonstration tables are created by migrations on `pgsql` as `Schema::create('lab.<table>', ...)`, contain only fictitious data, and receive an explicit `DB::statement('GRANT SELECT ON lab.<table> TO sqliguard_lab')` in the same migration.
 - Superuser-only database setup lives in `database/provisioning/lab-hardening.sql`. It is not a migration, because `sqliguard_app` intentionally lacks those rights.
+- Lab migrations return early on non-PostgreSQL drivers (the SQLite test database has no `lab` schema). Fake lab data comes from the repeatable `LabDemoSeeder` only.
+- Never give `sqliguard_lab` access to `lab.demo_account_credentials`. The only function it may execute is `lab.demo_password_matches()`. Any new function needs approval, `SECURITY DEFINER` with a pinned `search_path`, and `REVOKE ALL … FROM PUBLIC`.
+- `lab.demo_password_matches()` is a known Boolean password-guessing oracle through Vulnerable Mode (`docs/architecture.md` section 4.4).
+  - Only `demo.analyst` / `Analyst-Lab-2026` is a known fake password. All other fake accounts get random passwords from `LabDemoSeeder::randomPassword()` on every seed.
+  - Never hardcode, print, log or assert-display those passwords, and never reintroduce guessable fake passwords.
+- Unsalted SHA-256 is only for fake lab credentials. Application accounts always use Laravel's `hashed` cast (bcrypt). Never use SHA-256 or any fast hash for real passwords.
 - Never edit existing migrations, and never drop or recreate the database or its tables. Add new migrations instead.
 - Tests use in-memory SQLite as the default connection (`phpunit.xml`). Never point `RefreshDatabase` or similar traits at `sqliguardDB`. `tests/Feature/LabConnectionBoundaryTest.php` (group `lab-database`) must keep passing.
 
 ## Security Rules
 
-- Vulnerable Mode is only available when `app()->environment('local')` is true and an administrator has enabled it. Whenever it is available, show the visible warning (`<x-lab-warning />`).
-- Raw PDO string-concatenated SQL is allowed only in the intentionally vulnerable demonstration code. Keep that code isolated, clearly marked, and on the `lab` connection.
-- Secure Mode uses the Query Builder or bound parameters on the `lab` connection. A read-only account does not replace parameterization.
+- Vulnerable Mode availability comes only from `App\Demonstrations\VulnerableMode::isAvailable()`, which is `local` only. A future administrator toggle may only make it stricter. Check it server-side, never only in views. Whenever it is available, show the visible warning (`<x-lab-warning />`).
+- String-built SQL may only be executed by `App\Demonstrations\VulnerableQueryExecutor`:
+  - fresh unregistered `lab` connection
+  - read-only transaction, always rolled back
+  - native `prepare()`/`execute()` (never `exec()` or emulated prepares with input)
+  - fixed wrapper with row and length limits
+  - disconnect afterwards
+
+  Never add an endpoint that accepts SQL, table, column or schema names. Demonstrations use fixed templates where input fills value positions only.
+- Secure Mode uses the Query Builder or bound parameters on the managed `lab` connection. A read-only account does not replace parameterization. Never interpolate bound values into the displayed secure SQL.
+- Map database errors to fixed messages (`DemonstrationRunner::safeErrorMessage()`). Never log demonstration input.
 - Use Form Requests for all application input, policies or gates for administrative operations, and Laravel authentication with hashed passwords.
 - Escape output with `{{ }}`. Never use `{!! !!}` for user input, generated queries or query results.
 - Never show users database credentials, stack traces or raw exception messages. `QueryException` messages include host and database names, so show sanitized summaries instead.

@@ -2,7 +2,10 @@
 
 namespace App\Providers;
 
+use Illuminate\Cache\RateLimiting\Limit;
+use Illuminate\Http\Request;
 use Illuminate\Pagination\Paginator;
+use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Validation\Rules\Password;
 
@@ -33,5 +36,10 @@ class AppServiceProvider extends ServiceProvider
             ->mixedCase()
             ->numbers()
             ->symbols());
+
+        // Every demonstration run opens a fresh lab database connection.
+        // Limit runs per user so one account cannot exhaust connections.
+        RateLimiter::for('demonstrations', fn (Request $request): Limit => Limit::perMinute(30)
+            ->by((string) $request->user()?->getAuthIdentifier()));
     }
 }

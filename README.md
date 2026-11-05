@@ -27,6 +27,7 @@ php artisan key:generate
 # once, as the PostgreSQL superuser: lab hardening and `lab` schema
 psql -U postgres -h 127.0.0.1 -d sqliguardDB -f database/provisioning/lab-hardening.sql
 php artisan migrate
+php artisan db:seed --class=LabDemoSeeder   # fictitious lab data (safe to re-run)
 php artisan sqliguard:create-admin   # first administrator (prompts; password input is hidden)
 npm run build               # or `npm run dev` while developing
 php artisan serve --host=127.0.0.1
@@ -38,12 +39,29 @@ Then open `http://127.0.0.1:8000/login`.
 
 There is no public registration. The first **Administrator** is created with `php artisan sqliguard:create-admin`. Administrators then create, edit, activate and deactivate Administrator and **Student/Tester** accounts under **Accounts** in the application. See [docs/architecture.md, section 5](docs/architecture.md#5-roles-and-feature-boundaries) for the authentication flow and account rules.
 
+## SQL Injection Demonstrations
+
+Administrators and Students/Testers open **Demonstrations** to run three comparisons:
+- tautology-based injection against a fake login
+- UNION-based injection against a fake catalogue
+- comment-based injection against fake documents
+
+Each comparison submits one input and shows **Vulnerable Mode** (input concatenated into the SQL) and **Secure Mode** (bound parameters) side by side. The panels show the SQL, parameters, results and an explanation.
+
+- Vulnerable Mode runs only when `APP_ENV=local`. It uses the restricted `sqliguard_lab` account on a fresh, read-only, single-statement connection.
+- Only fictitious data in the `lab` schema is ever queried.
+
+See [docs/architecture.md, section 9](docs/architecture.md#9-sql-injection-demonstrations).
+
 ## Tests
 
 ```sh
 php artisan test --compact
 php artisan test --compact --exclude-group lab-database   # without PostgreSQL
-php artisan test --compact tests/Feature/Http             # authentication, roles, account management
+php artisan test --compact --group lab-database           # PostgreSQL lab integration tests only
+php artisan test --compact tests/Feature/Http             # authentication, roles, account management, demonstration HTTP
 ```
+
+The `lab-database` tests query the real `lab` schema through the restricted lab account. Run `php artisan migrate` and `php artisan db:seed --class=LabDemoSeeder` first.
 
 Tests run on in-memory SQLite and refuse to start if the configuration is cached. Run `php artisan config:clear` first if you have run `config:cache`.

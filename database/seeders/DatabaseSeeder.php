@@ -15,9 +15,11 @@ class DatabaseSeeder extends Seeder
      * Deliberately creates no user accounts: a seeded account would have a
      * known password. Create the first administrator with
      * `php artisan sqliguard:create-admin`, then manage accounts in the app.
+     *
+     * Seeds only the fictitious lab demonstration data (repeatable).
      */
     public function run(): void
     {
-        //
+        $this->call(LabDemoSeeder::class);
     }
 }

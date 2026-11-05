@@ -2,7 +2,7 @@
 
 **SQLiGuard: A Web Input Security Demonstrator Comparing Vulnerable and Parameterized Queries Against SQL Injection in a Controlled Lab Environment**
 
-This document records the approved architecture, database boundaries and feature scope. Update it when an approved decision changes. Status: Phase 2 (authentication and role management), 2026-11-05.
+This document records the approved architecture, database boundaries and feature scope. Update it when an approved decision changes. Status: Phase 3 (SQL injection demonstration engine), 2026-11-05.
 
 ## 1. Technology Stack
 
@@ -41,8 +41,10 @@ The project follows the default Laravel 13 layout. New code goes in the conventi
 | `resources/views/auth`, `admin`, `student`, `errors` | Login, role landing pages, account management, 403 page |
 | `tests/Feature` | Feature tests, mirroring the path of the class under test |
 | `docs/` | Project documentation |
-
-The vulnerable and secure demonstration query code will be kept together in one small, clearly named class that runs on the `lab` connection, so all intentionally unsafe SQL lives in one reviewable place. Its exact location will be agreed in the phase that implements it.
+| `app/Demonstrations` | Demonstration engine (section 9): the three demonstration definitions, `DemonstrationRunner`, and `VulnerableQueryExecutor`, the only class that executes string-built SQL |
+| `app/Enums/DemonstrationType.php` | The three demonstration identifiers used in URLs |
+| `database/seeders/LabDemoSeeder.php` | Repeatable fictitious data for the `lab` tables |
+| `resources/views/demonstrations` | Shared demonstration list and side-by-side comparison page |
 
 ## 3. Database Architecture
 
@@ -98,7 +100,9 @@ Neither one stops disclosure from tables the lab account *can* read. Bypassing a
 | Schema `public`: USAGE / CREATE | Yes / Yes | **No / No** |
 | Application tables in `public` (`users`, `password_reset_tokens`, `sessions`, `cache`, `cache_locks`, `jobs`, `job_batches`, `failed_jobs`, `migrations`) | Owner | **None** |
 | Schema `lab` | Owner (USAGE + CREATE) | USAGE only, **no CREATE** |
-| Demo tables in `lab` | Owner | SELECT, only when explicitly granted per table |
+| `lab.demo_accounts`, `lab.demo_products`, `lab.demo_internal_projects`, `lab.demo_documents` | Owner | **SELECT only** (explicit per-table grant) |
+| `lab.demo_account_credentials` (fake password digests) | Owner | **None** |
+| Function `lab.demo_password_matches(bigint, text)` | Owner | **EXECUTE** (explicit). Not executable by PUBLIC |
 | INSERT / UPDATE / DELETE / TRUNCATE anywhere | Own tables | **Never** |
 | Superuser / CREATEDB / CREATEROLE / BYPASSRLS / REPLICATION | No | No |
 | `statement_timeout` | Server default | **5s** (role setting) |
@@ -109,10 +113,46 @@ Neither one stops disclosure from tables the lab account *can* read. Bypassing a
 - Demo tables are created by normal Laravel migrations on the default `pgsql` connection, using schema-qualified names. Laravel 13 supports `schema.table` references on PostgreSQL.
 - Because `sqliguard_app` owns the `lab` schema and every table it creates, the same migration can grant access.
 - **There are no default privileges.** A new table in `lab` is invisible to `sqliguard_lab` until a migration grants it explicitly, and only `SELECT` is ever granted.
-- Do not create functions, views or sequences in `lab` for the lab account to use unless that is separately approved. PostgreSQL grants EXECUTE on new functions to PUBLIC by default.
+- Do not create functions, views or sequences in `lab` for the lab account to use unless that is separately approved. PostgreSQL grants EXECUTE on new functions to PUBLIC by default. The one approved exception is `lab.demo_password_matches()` (below).
 - "Reset demonstration data" re-seeds through `pgsql`, never through `lab`.
+- Demo migrations do nothing on non-PostgreSQL drivers. The in-memory SQLite test database has no `lab` schema, and demonstrations always query the real `lab` connection.
 
-Pattern for a future demo-table migration (not created yet):
+Implemented in `2026_11_05_143215_create_lab_demo_tables`:
+
+| Object | Purpose | Explicit grant to `sqliguard_lab` |
+| --- | --- | --- |
+| `lab.demo_accounts` (id, username, display_name, account_type) | Fake login dataset (tautology) | `GRANT SELECT` |
+| `lab.demo_account_credentials` (account_id, password_digest) | SHA-256 digests of the fake passwords | none, and `REVOKE ALL … FROM PUBLIC` |
+| `lab.demo_products` (id, name, category, price, is_published) | Fake catalogue (UNION) | `GRANT SELECT` |
+| `lab.demo_internal_projects` (id, codename, classification, budget) | Designated fake "hidden" rows for the UNION demonstration | `GRANT SELECT` |
+| `lab.demo_documents` (id, title, owner_team, visibility) | Fake documents (comment) | `GRANT SELECT` |
+| `lab.demo_password_matches(bigint, text) → boolean` | Fake password check | `REVOKE ALL … FROM PUBLIC`; `GRANT EXECUTE` |
+
+**Why the password-check function exists.** A login query must reference the password in its `WHERE` clause, and PostgreSQL requires SELECT privilege on every referenced column. If the lab account could read a password column, a UNION injection could display it.
+
+So the digests live in a table the lab account cannot read. The login query calls `lab.demo_password_matches()` instead. This function:
+
+- is `SECURITY DEFINER`, owned by `sqliguard_app`
+- has a pinned `search_path = pg_catalog, pg_temp`
+- contains no dynamic SQL
+- is `STABLE`/`STRICT`
+- returns only a boolean
+
+This is the narrowest privilege that lets the tautology bypass work without ever exposing a fake password or digest. It does, however, create a Boolean password-guessing oracle (section 4.4).
+
+Seed the fake data with `php artisan db:seed --class=LabDemoSeeder`, or `php artisan db:seed`, which calls it. The seeder:
+
+- replaces the contents of the five `lab` tables in one transaction on `pgsql`, so it can be re-run safely
+- keeps the same account IDs and records, with no duplicates
+- never touches application tables
+
+**Fake credentials.** Only `demo.analyst` has a known password, `Analyst-Lab-2026`, because it is published as a sample input.
+
+Every other fake account (`demo.admin`, `demo.student`, `demo.guest`) gets a **new cryptographically random 20-character password on every seeder run**: `Str::password(20)`, which picks characters with `random_int()`. Each password is hashed immediately and then discarded. It is never stored, printed, logged or shown in test output, so nobody knows it. The intended way to "log in" as those accounts is the injection itself.
+
+Only the SHA-256 digests are stored, in `lab.demo_account_credentials`.
+
+Pattern for further demo-table migrations:
 
 ```php
 public function up(): void
@@ -150,7 +190,37 @@ The script ends with read-only verification queries. `tests/Feature/LabConnectio
 ### 4.4 Known limits
 
 - PostgreSQL system catalogs (`pg_catalog`, `information_schema`) are readable by every role. An injection can list table and column *names*, but cannot read rows from tables the lab account has no privileges on. This can be used to explain schema enumeration.
-- `statement_timeout` is a user-settable parameter. Injected SQL such as `set_config('statement_timeout', '0', false)` could lift it for the rest of that database session. The demonstration code (later phase) must therefore run each vulnerable query on a fresh `lab` connection (for example `DB::purge('lab')` afterwards), and must never reuse that session for Secure Mode.
+- `statement_timeout` is a user-settable parameter. Injected SQL such as `set_config('statement_timeout', '0', false)` could lift it for the rest of that database session. `VulnerableQueryExecutor` therefore:
+  - runs each vulnerable query on a brand-new connection that is never registered for reuse, and disconnects it afterwards
+  - sets `SET LOCAL statement_timeout = '5s'` inside a read-only transaction that is always rolled back
+
+  Secure Mode never uses that session (section 9.3).
+- The lab account can cancel or terminate its *own* role's backends (`pg_cancel_backend()`), as any PostgreSQL role can. An injection could therefore interrupt another student's concurrent demonstration query. This is acceptable for a supervised local lab.
+- **Boolean password-guessing oracle.** `lab.demo_password_matches(account_id, password)` answers true or false for any guess. Through the normal login form, each comparison run tests one guess. Through Vulnerable Mode, however, an injection can call the function on many generated candidates **inside a single SQL statement**. For example, this 123-character UNION input fits the 200-character limit:
+
+  ```
+  none' UNION SELECT g, 'hit', 'x', 0 FROM generate_series(1,999999) g WHERE lab.demo_password_matches(2, g::text) AND 'a'='a
+  ```
+
+  - **The rate limit doesn't help.** The `throttle:demonstrations` limit (30 runs per minute per user) counts HTTP requests, not guesses, so it does not limit how many guesses one statement makes.
+  - **The 5-second statement timeout is the only per-statement bound.**
+  - **Measured speed** (local PostgreSQL 18, lab account): about **80,000 guesses per second**. That is roughly **400,000 guesses per statement** and up to about **12 million per minute per user** at the rate limit.
+  - **Mitigations:**
+    - Only `demo.analyst` has a known password, and it is published.
+    - Every other fake password is a fresh random 20-character string, so it cannot be found by brute force, and the old `<Role>-Lab-2026` pattern no longer exists.
+    - A correct guess grants nothing: no session, no application access, and no data beyond the account rows the lab account can already read.
+    - The digests themselves are never readable.
+  - **Remaining costs:** an attacker can load the database CPU for up to 5 seconds per run, and students can observe the oracle. It is documented here as an intentional teaching aspect.
+- **Unsalted SHA-256 is for the fake lab credentials only.** It is fast and unsalted, which is exactly what makes the oracle above efficient. It is **not suitable for real password storage**, and SQLiGuard does not use it for real accounts.
+  - **Application accounts** (`public.users`) are hashed by Laravel's `hashed` cast with **bcrypt**: the default driver, cost `BCRYPT_ROUNDS=12`. Bcrypt is salted and deliberately slow. Laravel can switch to **Argon2** through `HASH_DRIVER`.
+  - Students should learn bcrypt or Argon2 from this project, not the lab digests.
+
+### 4.5 Security hardening follow-ups
+
+| Follow-up | Why | What it needs |
+| --- | --- | --- |
+| Dedicated, login-less owner role for `lab.demo_password_matches()`, for example `sqliguard_lab_auth`, with SELECT only on `lab.demo_account_credentials` | The function currently runs with `sqliguard_app`'s privileges, which include ownership of every application table. The fixed body cannot reach them, but a narrower owner would contain any future mistake in the function | A superuser change to `database/provisioning/lab-hardening.sql` (create the role, grant it SELECT on the credentials table and CREATE on `lab` or `ALTER FUNCTION … OWNER TO` by a superuser), and a migration strategy for the function and grants that works with a role the application account cannot create |
+| Optionally lower the vulnerable-run timeout (`SET LOCAL statement_timeout = '2s'`) | Cuts oracle throughput and database load by about 60% | Measured: every demonstration sample and test payload completes in under 0.25 s, so no example would break. Assertions that expect `5s` inside the vulnerable transaction, and the documentation, would need updating. The role-level 5s setting can stay |
 
 ## 5. Roles and Feature Boundaries
 
@@ -168,7 +238,8 @@ The script ends with read-only verification queries. `tests/Feature/LabConnectio
 | View personal test history | ✓ | ✓ |
 
 - The main demonstration interface always runs the **same input** through both modes and shows the results **side by side**. A single mode toggle must not replace this comparison.
-- The administrator's Vulnerable Mode switch only turns the vulnerable side on or off. It can never make Vulnerable Mode available outside the `local` environment.
+- The administrator's Vulnerable Mode switch only turns the vulnerable side on or off. It can never make Vulnerable Mode available outside the `local` environment. The switch is not built yet: Vulnerable Mode is currently available whenever the environment is `local`.
+- Demonstrations (`/demonstrations`) are shared by both roles through `role:administrator,student`. The role landing pages stay separate.
 - Administrative operations are protected by authorization checks (policies or gates), not by hiding links.
 - Anything not in this table is out of scope unless approved.
 
@@ -269,8 +340,8 @@ No default or seeded administrator exists, and `DatabaseSeeder` creates no accou
 
 | Rule | How it is applied |
 | --- | --- |
-| Vulnerable Mode restricted to local development | Available only when `app()->environment('local')` **and** enabled by an administrator |
-| Visible warning when Vulnerable Mode is available | `<x-lab-warning />` in the base layout, shown in the `local` environment |
+| Vulnerable Mode restricted to local development | `App\Demonstrations\VulnerableMode::isAvailable()` (`local` only), enforced server-side in both `DemonstrationRunner` and `VulnerableQueryExecutor`. The administrator switch (an additional condition) is a later phase |
+| Visible warning when Vulnerable Mode is available | `<x-lab-warning />` in the base layout uses the same `VulnerableMode::isAvailable()` check |
 | No real credentials or user information in demos | Demo tables contain only fictitious data. The lab account cannot reach the `public` schema |
 | Fake demonstration datasets | Seeded through `pgsql` into the `lab` schema |
 | Laravel authentication, hashed passwords | Built-in session guard. `hashed` cast on `User::password`. Password hashes are hidden and never rendered (section 5) |
@@ -279,10 +350,10 @@ No default or seeded administrator exists, and `DatabaseSeeder` creates no accou
 | Inactive accounts | Refused at login. Open sessions are ended by `EnsureAccountIsActive` |
 | CSRF | `@csrf` on every form. State changes use POST/PUT/PATCH only |
 | Form Request validation | Every application input goes through a Form Request |
-| Secure Mode uses Query Builder or parameterized queries | Bound parameters on the `lab` connection |
-| Raw PDO only for intentionally vulnerable demos | Isolated in one clearly marked class on the `lab` connection |
+| Secure Mode uses Query Builder or parameterized queries | Query Builder with bound parameters on the managed `lab` connection |
+| Raw PDO only for intentionally vulnerable demos | Only `App\Demonstrations\VulnerableQueryExecutor`, on an isolated throw-away `lab` connection (section 9.3) |
 | Escape user-generated content | Blade `{{ }}` everywhere. `{!! !!}` is never used for input, queries or results |
-| No credentials, stack traces or server errors exposed | Catch `QueryException` from demonstrations and show a sanitized summary. Its raw message includes host and database names. See also 6.1 |
+| No credentials, stack traces or server errors exposed | `DemonstrationRunner` catches every database exception and maps its SQLSTATE to a fixed educational message. The raw message, which includes SQL, host, port and database, is never shown. Only unexpected errors are logged, with SQLSTATE, demonstration and mode, never the input. See also 6.1 |
 | Authorization on administrative operations | `role:administrator` route middleware plus `UserPolicy` on every account-management action |
 | Separate application and lab connections | `pgsql` vs `lab`, with different accounts and schemas |
 | No weakening of database permissions | Permission changes are documented here and approved first |
@@ -319,10 +390,90 @@ No default or seeded administrator exists, and `DatabaseSeeder` creates no accou
 
   It needs the local PostgreSQL server. Exclude it with `php artisan test --exclude-group lab-database` when PostgreSQL is unavailable.
 - `tests/Feature/HomePageTest.php` checks the base layout and that the lab warning appears only in the `local` environment.
+- SQL injection demonstrations (Phase 3). Tests marked † are in group `lab-database`. They execute real queries against the seeded `lab` schema through the restricted `lab` account only, and they need `php artisan migrate` and `php artisan db:seed --class=LabDemoSeeder`.
+
+  | Test | Covers |
+  | --- | --- |
+  | `tests/Unit/Demonstrations/VulnerableQueryTest.php` | Verbatim insertion, input segments, no re-substitution, wrapper layout |
+  | `tests/Feature/Http/Controllers/DemonstrationControllerTest.php` | Guest refusal, both roles allowed, 404 for unknown demonstrations, samples, validation, rate limit, student still blocked from accounts, plus † full HTTP comparison, escaping, local-only restriction |
+  | † `tests/Feature/Demonstrations/DemonstrationRunnerTest.php` | All three demonstrations: baseline, attack, secure bindings and structure, no fake passwords or digests in results, no application rows, local-only restriction, safe error messages |
+  | † `tests/Feature/Demonstrations/VulnerableQueryExecutorTest.php` | Server-side prepare rejects two complete statements, stacked DROP fails, new connection per execution and never shared with Secure Mode, injected session settings do not persist, row cap, value truncation, refusal outside `local` |
+  | † `tests/Feature/Database/LabDemoPrivilegesTest.php` | Connection accounts, SELECT on exactly the granted tables, no writes, no access to credentials, app owns everything, no default privileges, no CREATE. For the function: exact signature, `boolean` return type, owner, SECURITY DEFINER, STABLE, STRICT and pinned `search_path`; native PHP Boolean result without casting; exact EXECUTE grants (no PUBLIC, no grant option); the lab account can execute only this function; no other functions in `lab`; non-sample fake accounts reject guessable passwords |
+  | `tests/Unit/Database/Seeders/LabDemoSeederTest.php` | Random fake passwords: 20 characters, contain a letter, a number and a symbol, are never repeated, and are never printed. The published sample is unchanged |
 
 ## 8. Phase Log
 
 | Phase | Status | Summary |
 | --- | --- | --- |
 | 1: Architecture and base setup | Complete | Bootstrap/Vite setup, base layout and warning, architecture docs, project rules, boundary tests, lab hardening and `lab` schema |
-| 2: Authentication and role management | Complete (pending review) | Session login/logout with rate limiting, `Role` enum and `role`/`is_active` columns, role middleware and `UserPolicy`, administrator account management, `sqliguard:create-admin`, role landing pages |
+| 2: Authentication and role management | Complete | Session login/logout with rate limiting, `Role` enum and `role`/`is_active` columns, role middleware and `UserPolicy`, administrator account management, `sqliguard:create-admin`, role landing pages |
+| 3: SQL injection demonstration engine | Complete | Tautology, UNION and comment demonstrations, side-by-side comparison, `lab` demo tables, seeder and narrow grants, isolated vulnerable executor, local-only enforcement |
+
+## 9. SQL Injection Demonstrations
+
+### 9.1 Shared comparison workflow
+
+Routes (`auth`, `auth.session`, `role:administrator,student`):
+
+| Route | Purpose |
+| --- | --- |
+| `GET /demonstrations` | List the three demonstrations |
+| `GET /demonstrations/{tautology\|union\|comment}` | Description, input form and predefined samples. `?sample=<key>` prefills a sample; unknown keys are ignored and unknown demonstrations return 404 |
+| `POST /demonstrations/{demonstration}` | Run the comparison (`throttle:demonstrations`: 30 per minute per user) |
+
+1. The user picks a demonstration, enters input or chooses a sample, and submits **once**.
+2. `RunDemonstrationRequest` validates only that demonstration's own fields: string, at most 200 characters, no control characters. Attack strings are allowed on purpose. Classification is Phase 4.
+3. `DemonstrationRunner` runs **Vulnerable Mode first, then Secure Mode**, with the identical input array, on separate connections.
+4. The page shows the two panels side by side, Vulnerable on the left and Secure on the right, stacking on small screens. Each panel has:
+   - the mode name
+   - the SQL
+   - the bound parameters
+   - a status badge
+   - a one-line result summary
+   - the result rows
+
+   Below the panels, an explanation covers what happened in each mode, why they differ, and the security principle.
+5. "Input altered the vulnerable query" is shown when Vulnerable Mode failed to parse or returned different rows from Secure Mode. Secure Mode always treats the input as data, so it defines the intended behavior.
+
+Nothing is stored. The comparison is temporary response data. Logging and test history are Phase 4.
+
+### 9.2 The three demonstrations
+
+All queries are fixed, application-authored templates. User input can only fill the marked value positions, never a table, column, schema or statement. Every template ends with its own closing quote, so injected input must close or absorb it.
+
+| Demonstration | Fixed vulnerable template (input in `{…}`) | Secure equivalent (Query Builder) | Attack sample → Vulnerable | Same input → Secure |
+| --- | --- | --- | --- | --- |
+| Tautology | `SELECT id, username, display_name, account_type FROM lab.demo_accounts WHERE lab.demo_password_matches(id, '{password}') AND username = '{username}' ORDER BY id` | `… where lab.demo_password_matches(id, ?) and "username" = ? order by "id" asc limit 50` | Username `' OR '1'='1` → all 4 fake accounts ("logged in" as the first). Password `x') OR ('1'='1` with `demo.analyst` → that account without its password | No matching account |
+| UNION | `SELECT id, name, category, price FROM lab.demo_products WHERE is_published = true AND category = '{category}' ORDER BY id` | `… where "is_published" = ? and "category" = ? order by "id" asc limit 50` | `none' UNION SELECT id, codename, classification, budget FROM lab.demo_internal_projects WHERE 'a'='a` → the 3 fake internal projects. The same against `public.users` → permission denied | No products |
+| Comment | `SELECT id, title, owner_team, visibility FROM lab.demo_documents WHERE owner_team = '{team}' AND visibility = 'public' ORDER BY id` | `… where "owner_team" = ? and "visibility" = ? order by "id" asc limit 50` | `team-alpha' --` → Team Alpha's 2 private documents plus the public one | No documents. The `visibility = ?` condition is still applied |
+
+Normal samples, such as `demo.analyst` / `Analyst-Lab-2026`, `stationery` and `team-alpha`, return the same rows in both modes. `Analyst-Lab-2026` is the only known fake password. The other fake accounts have random passwords, so the injection is the only way to "log in" as them.
+
+The tautology demonstration never touches `public.users`, never calls Laravel's `Auth`, and never creates or changes a session. A "successful" fake login is only a message on the page.
+
+Results never include a password or digest. The credentials table is unreadable by the lab account, and the selected columns are fixed.
+
+### 9.3 Vulnerable execution safety (`VulnerableQueryExecutor`)
+
+| Requirement | How it is met |
+| --- | --- |
+| Local only | Refused unless `VulnerableMode::isAvailable()`. Checked in the runner (which returns a "refused" panel while Secure Mode still runs) and again in the executor (which throws) |
+| Fresh connection per execution | `ConnectionFactory::make(config('database.connections.lab'))` creates a new connection that is never registered with the `DatabaseManager`, so nothing else can obtain or reuse it. It is disconnected in `finally` |
+| Never reused for Secure Mode | Secure Mode uses the managed `DB::connection('lab')`. Tests compare PostgreSQL backend PIDs |
+| Altered session settings cannot persist | Each execution runs inside `BEGIN` → `SET TRANSACTION READ ONLY` → `SET LOCAL statement_timeout = '5s'`, and is always rolled back. The connection is then discarded |
+| One statement only | The SQL is run with `PDO::prepare()`/`execute()` with emulated prepares explicitly **off**, which uses a native PostgreSQL prepare. PostgreSQL refuses a prepare that contains more than one command. `PDO::exec()`, which would accept stacked statements (verified), is never given input. Preparing does **not** make the query safe: the input is already part of the SQL text |
+| No arbitrary SQL endpoint | There is none. Only the three fixed templates exist, chosen by a route enum |
+| Bounded output | The generated SQL runs inside a fixed wrapper: `SELECT left(col::text, 200) AS col, … FROM (\n<generated>\n) AS demo_result(cols) LIMIT 51`. The line breaks stop an injected `--` from commenting out the wrapper. The column list enforces the expected shape, at most 50 rows are shown, and long values are cut server-side |
+| Least privilege | `sqliguard_lab`: SELECT on four fake tables, EXECUTE on one boolean function, nothing else (section 4) |
+| Safe errors | SQLSTATE is mapped to fixed messages (syntax, permission denied, timeout, read-only, undefined object, data error). Raw messages never leave the runner |
+
+The page shows the generated SQL with the user's characters highlighted, and the full executed wrapper statement in a collapsible section. All output is escaped with Blade `{{ }}`. Secure Mode shows its SQL with `?` placeholders and lists the bound values separately. Values are never interpolated into the displayed statement.
+
+### 9.4 Running the demonstrations locally
+
+1. Make sure `APP_ENV=local` in `.env`. Vulnerable Mode is refused in any other environment.
+2. Run `php artisan migrate`, then `php artisan db:seed --class=LabDemoSeeder`. The seeder can be re-run at any time to restore the fake data.
+3. Run `npm run build`, then `php artisan serve --host=127.0.0.1`.
+4. Log in as an Administrator or Student/Tester and open **Demonstrations**.
+
+For a live class, set `APP_DEBUG=false` (section 6.1). Demonstration errors are always shown as safe messages, regardless of `APP_DEBUG`.
