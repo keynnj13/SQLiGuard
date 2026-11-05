@@ -1,3 +1,48 @@
+# SQLiGuard Project Rules
+
+SQLiGuard is a fourth-year BSIT project: a web input security demonstrator comparing vulnerable and parameterized queries against SQL injection in a controlled lab environment. The full architecture, database boundaries and role definitions are in `docs/architecture.md`; read it before starting work. These project rules take precedence over the generic Laravel Boost guidelines below where they conflict. Keep this section outside the Boost block so `php artisan boost:update` preserves it.
+
+## Scope
+
+- Implement only the approved features in `docs/architecture.md`. Do not add features, packages or abstractions outside that scope.
+- Work one phase at a time and stop when the requested phase is complete.
+- The main demonstration page compares Vulnerable Mode and Secure Mode side by side, using the same input. Never replace it with a single mode toggle.
+
+## Stack
+
+- Laravel 13, PHP 8.3+, PostgreSQL 18, Blade, Bootstrap 5, minimal JavaScript, Chart.js (dashboards only), Vite.
+- Bootstrap and Chart.js are npm packages bundled by Vite. Do not add Tailwind, Livewire, Inertia, Vue, React, jQuery, CDN-hosted assets or other UI frameworks.
+- Pages use the `<x-layouts.app>` layout component and Bootstrap classes.
+
+## Database Connections
+
+- `pgsql` (account `sqliguard_app`) is the default connection. Use it for users, authentication, application records, test history, activity logs, dashboard data, administrative records and all migrations.
+- `lab` (account `sqliguard_lab`, `search_path` = `lab`) is used only for demonstration queries (both modes) against fake demonstration tables in the `lab` schema.
+- Application tables live in schema `public`. Demonstration tables live only in schema `lab`, which `sqliguard_app` owns.
+- Never run intentionally vulnerable queries on `pgsql`, and never read or write application data through `lab`.
+- Never grant `sqliguard_lab` write, TRUNCATE, TEMP or DDL privileges, any access to schema `public`, or default privileges. Never weaken permissions to make a demonstration work. Any permission change needs an explanation and the user's approval first.
+- Demonstration tables are created by migrations on `pgsql` as `Schema::create('lab.<table>', ...)`, contain only fictitious data, and receive an explicit `DB::statement('GRANT SELECT ON lab.<table> TO sqliguard_lab')` in the same migration.
+- Superuser-only database setup lives in `database/provisioning/lab-hardening.sql`. It is not a migration, because `sqliguard_app` intentionally lacks those rights.
+- Never edit existing migrations, and never drop or recreate the database or its tables. Add new migrations instead.
+- Tests use in-memory SQLite as the default connection (`phpunit.xml`). Never point `RefreshDatabase` or similar traits at `sqliguardDB`. `tests/Feature/LabConnectionBoundaryTest.php` (group `lab-database`) must keep passing.
+
+## Security Rules
+
+- Vulnerable Mode is only available when `app()->environment('local')` is true and an administrator has enabled it. Whenever it is available, show the visible warning (`<x-lab-warning />`).
+- Raw PDO string-concatenated SQL is allowed only in the intentionally vulnerable demonstration code. Keep that code isolated, clearly marked, and on the `lab` connection.
+- Secure Mode uses the Query Builder or bound parameters on the `lab` connection. A read-only account does not replace parameterization.
+- Use Form Requests for all application input, policies or gates for administrative operations, and Laravel authentication with hashed passwords.
+- Escape output with `{{ }}`. Never use `{!! !!}` for user input, generated queries or query results.
+- Never show users database credentials, stack traces or raw exception messages. `QueryException` messages include host and database names, so show sanitized summaries instead.
+- Demonstration data must be fictitious: no real credentials or personal information.
+- Keep secrets in `.env` only, and never commit `.env`. `.env.example` must never contain real credentials.
+- `APP_DEBUG=true` is for normal local development only. It must be `false` during live demonstrations (`docs/architecture.md` section 6.1).
+- Run each vulnerable demonstration query on a fresh `lab` connection and never reuse that session for Secure Mode, because injected SQL can change session settings such as `statement_timeout`.
+
+## Verification
+
+- Never report a task as complete without running `php artisan test --compact` and `vendor/bin/pint --dirty --format agent`, and reporting the results.
+
 <laravel-boost-guidelines>
 === foundation rules ===
 

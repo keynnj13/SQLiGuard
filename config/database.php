@@ -110,7 +110,9 @@ return [
             'charset' => 'utf8',
             'prefix' => '',
             'prefix_indexes' => true,
-            'search_path' => 'public',
+            // Demonstration tables live in the dedicated `lab` schema; the lab
+            // account has no USAGE on `public`, where the application tables live.
+            'search_path' => 'lab',
             'sslmode' => 'prefer',
         ],
 
@@ -164,7 +166,7 @@ return [
 
         'options' => [
             'cluster' => env('REDIS_CLUSTER', 'redis'),
-            'prefix' => env('REDIS_PREFIX', Str::slug((string) env('APP_NAME', 'laravel')) . '-database-'),
+            'prefix' => env('REDIS_PREFIX', Str::slug((string) env('APP_NAME', 'laravel')).'-database-'),
             'persistent' => env('REDIS_PERSISTENT', false),
         ],
 

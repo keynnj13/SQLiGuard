@@ -1,9 +1,6 @@
-@import 'tailwindcss';
-
-@source '../../vendor/laravel/framework/src/Illuminate/Pagination/resources/views/*.blade.php';
-@source '../../storage/framework/views/*.php';
-
-@theme {
-    --font-sans: 'Instrument Sans', ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji',
-        'Segoe UI Symbol', 'Noto Color Emoji';
-}
+/*
+ * SQLiGuard styles.
+ * Bootstrap 5 is bundled from node_modules by Vite (no CDN), so the lab works
+ * offline. Add project-specific rules below the import only when needed.
+ */
+@import 'bootstrap/dist/css/bootstrap.min.css';
