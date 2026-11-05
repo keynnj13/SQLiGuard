@@ -39,6 +39,16 @@ SQLiGuard is a fourth-year BSIT project: a web input security demonstrator compa
 - `APP_DEBUG=true` is for normal local development only. It must be `false` during live demonstrations (`docs/architecture.md` section 6.1).
 - Run each vulnerable demonstration query on a fresh `lab` connection and never reuse that session for Secure Mode, because injected SQL can change session settings such as `statement_timeout`.
 
+## Authentication and Roles
+
+- Roles come only from `App\Enums\Role` (`administrator`, `student`). Check them with `User::hasRole()` / `User::isAdministrator()`, never with string comparisons.
+- Protect role areas with the `role:` route middleware (`role:administrator`, `role:student`) inside the `auth` + `auth.session` group, and authorize every account action with `UserPolicy`. Hiding a link is never authorization.
+- `role` and `is_active` are not mass assignable. Set them explicitly with `forceFill()` only in administrator actions or the create-admin command.
+- Never add public registration, password-reset routes, seeded or default accounts, or hardcoded credentials. The first administrator is created with `php artisan sqliguard:create-admin`.
+- Keep the account integrity rules in `Admin\UserController`: no self role change, no self deactivation, and at least one active administrator, checked under `lockForUpdate()` in the same transaction.
+- New passwords use `Password::defaults()` and the `hashed` cast. Never render, log or return a password or its hash.
+- Authentication and account data use the `pgsql` connection only, never `lab`.
+
 ## Verification
 
 - Never report a task as complete without running `php artisan test --compact` and `vendor/bin/pint --dirty --format agent`, and reporting the results.

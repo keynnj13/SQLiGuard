@@ -27,13 +27,23 @@ php artisan key:generate
 # once, as the PostgreSQL superuser: lab hardening and `lab` schema
 psql -U postgres -h 127.0.0.1 -d sqliguardDB -f database/provisioning/lab-hardening.sql
 php artisan migrate
+php artisan sqliguard:create-admin   # first administrator (prompts; password input is hidden)
 npm run build               # or `npm run dev` while developing
 php artisan serve --host=127.0.0.1
 ```
+
+Then open `http://127.0.0.1:8000/login`.
+
+## Accounts and Roles
+
+There is no public registration. The first **Administrator** is created with `php artisan sqliguard:create-admin`. Administrators then create, edit, activate and deactivate Administrator and **Student/Tester** accounts under **Accounts** in the application. See [docs/architecture.md, section 5](docs/architecture.md#5-roles-and-feature-boundaries) for the authentication flow and account rules.
 
 ## Tests
 
 ```sh
 php artisan test --compact
 php artisan test --compact --exclude-group lab-database   # without PostgreSQL
+php artisan test --compact tests/Feature/Http             # authentication, roles, account management
 ```
+
+Tests run on in-memory SQLite and refuse to start if the configuration is cached. Run `php artisan config:clear` first if you have run `config:cache`.

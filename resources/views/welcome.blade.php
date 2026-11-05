@@ -6,6 +6,14 @@
             in a controlled lab environment.
         </p>
 
+        <div class="mb-4">
+            @auth
+                <a href="{{ route('dashboard') }}" class="btn btn-primary">Go to your dashboard</a>
+            @else
+                <a href="{{ route('login') }}" class="btn btn-primary">Log in</a>
+            @endauth
+        </div>
+
         <div class="row g-4">
             <div class="col-md-6">
                 <div class="card h-100 border-danger-subtle">
