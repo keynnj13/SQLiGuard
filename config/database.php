@@ -99,6 +99,21 @@ return [
             'sslmode' => env('DB_SSLMODE', 'prefer'),
         ],
 
+        'lab' => [
+            'driver' => 'pgsql',
+            'url' => env('LAB_DB_URL'),
+            'host' => env('LAB_DB_HOST', '127.0.0.1'),
+            'port' => env('LAB_DB_PORT', '5432'),
+            'database' => env('LAB_DB_DATABASE', 'sqliguardDB'),
+            'username' => env('LAB_DB_USERNAME', 'sqliguard_lab'),
+            'password' => env('LAB_DB_PASSWORD'),
+            'charset' => 'utf8',
+            'prefix' => '',
+            'prefix_indexes' => true,
+            'search_path' => 'public',
+            'sslmode' => 'prefer',
+        ],
+
         'sqlsrv' => [
             'driver' => 'sqlsrv',
             'url' => env('DB_URL'),
@@ -149,7 +164,7 @@ return [
 
         'options' => [
             'cluster' => env('REDIS_CLUSTER', 'redis'),
-            'prefix' => env('REDIS_PREFIX', Str::slug((string) env('APP_NAME', 'laravel')).'-database-'),
+            'prefix' => env('REDIS_PREFIX', Str::slug((string) env('APP_NAME', 'laravel')) . '-database-'),
             'persistent' => env('REDIS_PERSISTENT', false),
         ],
 
