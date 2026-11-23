@@ -2,7 +2,7 @@
 
 **SQLiGuard: A Web Input Security Demonstrator Comparing Vulnerable and Parameterized Queries Against SQL Injection in a Controlled Lab Environment**
 
-This document records the approved architecture, database boundaries and feature scope. Update it when an approved decision changes. Status: Phase 3 (SQL injection demonstration engine), 2026-11-05.
+This document records the approved architecture, database boundaries and feature scope. Update it when an approved decision changes. Status: Phase 4 (input validation, payload classification and demonstration history), 2026-11-24.
 
 ## 1. Technology Stack
 
@@ -14,7 +14,7 @@ This document records the approved architecture, database boundaries and feature
 | Views | Blade | Shared layout: `<x-layouts.app>` |
 | UI | Bootstrap 5.3 | Bundled from npm by Vite, with no CDN, so the lab works offline |
 | JavaScript | Minimal | Bootstrap's JS (with Popper) only |
-| Charts | Chart.js 4 | Installed. Imported only by dashboard views (later phase) |
+| Charts | Chart.js 4 | Installed but not yet imported anywhere. Reserved for dashboard views, which are not implemented |
 | Build | Vite 8 + `laravel-vite-plugin` | Entries: `resources/css/app.css`, `resources/js/app.js` |
 | Dev tooling | Laravel Boost, Pint, PHPUnit | Boost guidelines live in `CLAUDE.md` / `AGENTS.md` |
 
@@ -27,12 +27,12 @@ The project follows the default Laravel 13 layout. New code goes in the conventi
 | Location | Purpose |
 | --- | --- |
 | `app/Console/Commands` | Artisan commands (`sqliguard:create-admin`) |
-| `app/Enums` | `Role`, the single source of role identifiers |
-| `app/Http/Controllers` | Thin controllers (`Auth/LoginController`, `DashboardController`, `Admin/UserController`) |
+| `app/Enums` | `Role` (the single source of role identifiers), `DemonstrationType`, `PayloadCategory`, `DemonstrationErrorCategory` |
+| `app/Http/Controllers` | Thin controllers (`Auth/LoginController`, `DashboardController`, `DemonstrationController`, `HistoryController`, `Admin/UserController`, `Admin/HistoryController`) |
 | `app/Http/Middleware` | `EnsureUserHasRole` (`role:` alias) and `EnsureAccountIsActive` |
-| `app/Http/Requests` | Form Requests for every application input |
-| `app/Policies` | Authorization for administrative operations (`UserPolicy`) |
-| `app/Models` | Application models on the `pgsql` connection |
+| `app/Http/Requests` | Form Requests for every application input (`RunDemonstrationRequest`, `ComparisonHistoryRequest`, login and account requests) |
+| `app/Policies` | Authorization: `UserPolicy` (accounts) and `ComparisonRecordPolicy` (history) |
+| `app/Models` | Application models on the `pgsql` connection (`User`, `ComparisonRecord`) |
 | `database/migrations` | All schema changes, run on `pgsql`. Existing migrations are never edited |
 | `database/provisioning/lab-hardening.sql` | Superuser-only database setup (section 4.3) |
 | `database/seeders` | Fictitious demonstration data. Never user accounts, which would have known passwords |
@@ -41,10 +41,12 @@ The project follows the default Laravel 13 layout. New code goes in the conventi
 | `resources/views/auth`, `admin`, `student`, `errors` | Login, role landing pages, account management, 403 page |
 | `tests/Feature` | Feature tests, mirroring the path of the class under test |
 | `docs/` | Project documentation |
-| `app/Demonstrations` | Demonstration engine (section 9): the three demonstration definitions, `DemonstrationRunner`, and `VulnerableQueryExecutor`, the only class that executes string-built SQL |
+| `app/Demonstrations` | Demonstration engine (section 9): the three demonstration definitions, `DemonstrationRunner`, `VulnerableQueryExecutor` (the only class that executes string-built SQL), `Comparison`, `ModeResult` and `ComparisonRecorder` (section 10) |
+| `app/Demonstrations/Classification` | `PayloadClassifier` and its read-only result `Classification` (section 9.5) |
 | `app/Enums/DemonstrationType.php` | The three demonstration identifiers used in URLs |
 | `database/seeders/LabDemoSeeder.php` | Repeatable fictitious data for the `lab` tables |
-| `resources/views/demonstrations` | Shared demonstration list and side-by-side comparison page |
+| `resources/views/demonstrations` | Shared demonstration list and side-by-side comparison page, including the classification panel |
+| `resources/views/history`, `resources/views/admin/history` | Comparison history lists and detail page (section 10) |
 
 ## 3. Database Architecture
 
@@ -55,8 +57,8 @@ One PostgreSQL database (`sqliguardDB`, owned by `postgres`) holds two schemas a
                           │ schema public (application)  schema lab (demo only) │
  Laravel app ── pgsql ──▶ │ sqliguard_app: owns tables   sqliguard_app: owns    │
    (default)              │   users, sessions, cache,      schema and demo      │
-                          │   jobs, migrations, history,   tables (migrations)  │
-                          │   logs, settings                                    │
+                          │   jobs, migrations,            tables (migrations)  │
+                          │   comparison_records                                │
                           │                                                     │
  Demo runner ── lab ────▶ │ sqliguard_lab: no USAGE      sqliguard_lab: USAGE + │
                           │   on public                    SELECT on explicitly │
@@ -64,18 +66,23 @@ One PostgreSQL database (`sqliguardDB`, owned by `postgres`) holds two schemas a
                           └─────────────────────────────────────────────────────┘
 ```
 
+**Deployment.** SQLiGuard is a standalone, single-host lab application: the Laravel application, its web server and the PostgreSQL server run on the same machine (the database is reached on `127.0.0.1`). The separation described here is between **database accounts and schemas**, not between machines or networks. No network isolation has been configured or verified.
+
+**Application records vs. laboratory records.** Everything in `public` is real application data (accounts, sessions, comparison history). Everything in `lab` is fictitious demonstration data. Demonstration queries never read `public`, and application features never read `lab` through the restricted account.
+
 ### 3.1 `pgsql`: application connection (default)
 
 - Account: `sqliguard_app`
 - Configured by `DB_*` in `.env` and `config/database.php` → `connections.pgsql` (`search_path` = `public`)
-- Used for: user accounts, authentication, sessions, cache, queue, application records, test history, activity logs, dashboard data, administrative records, and running every migration, including creating demonstration tables in the `lab` schema.
+- Used for: user accounts, authentication, sessions, cache, queue, comparison history (`public.comparison_records`, section 10), and running every migration, including creating demonstration tables in the `lab` schema. There are no activity-log, settings or dashboard tables.
 
 ### 3.2 `lab`: demonstration connection
 
 - Account: `sqliguard_lab`
 - Configured by `LAB_DB_*` in `.env` and `config/database.php` → `connections.lab` (`search_path` = `lab`)
-- Used **only** for demonstration queries, in both Vulnerable Mode and Secure Mode, against fake demonstration tables in the `lab` schema.
+- Used **only** for demonstration queries, in both Vulnerable Mode and Secure Mode, against fake demonstration tables in the `lab` schema. Vulnerable Mode opens a fresh, unregistered connection with this configuration for every run; Secure Mode uses the managed connection (section 9.3).
 - Application credentials are never used for intentionally vulnerable queries.
+- Never used for comparison history: the recorder writes through `pgsql`, and the lab account has no privilege on `comparison_records` or its sequence.
 - Usage in code: `DB::connection('lab')`.
 
 Real passwords exist only in `.env`, which is git-ignored. `.env.example` lists the variable names with empty passwords.
@@ -98,7 +105,8 @@ Neither one stops disclosure from tables the lab account *can* read. Bypassing a
 | CONNECT on `sqliguardDB` | Yes | Yes |
 | TEMPORARY on `sqliguardDB` | No (not needed by Laravel) | **No** |
 | Schema `public`: USAGE / CREATE | Yes / Yes | **No / No** |
-| Application tables in `public` (`users`, `password_reset_tokens`, `sessions`, `cache`, `cache_locks`, `jobs`, `job_batches`, `failed_jobs`, `migrations`) | Owner | **None** |
+| Application tables in `public` (`users`, `password_reset_tokens`, `sessions`, `cache`, `cache_locks`, `jobs`, `job_batches`, `failed_jobs`, `migrations`, `comparison_records`) | Owner | **None** (no table or column privilege) |
+| Sequences in `public` (including `comparison_records_id_seq`) | Owner | **None** (no USAGE, SELECT or UPDATE) |
 | Schema `lab` | Owner (USAGE + CREATE) | USAGE only, **no CREATE** |
 | `lab.demo_accounts`, `lab.demo_products`, `lab.demo_internal_projects`, `lab.demo_documents` | Owner | **SELECT only** (explicit per-table grant) |
 | `lab.demo_account_credentials` (fake password digests) | Owner | **None** |
@@ -114,7 +122,7 @@ Neither one stops disclosure from tables the lab account *can* read. Bypassing a
 - Because `sqliguard_app` owns the `lab` schema and every table it creates, the same migration can grant access.
 - **There are no default privileges.** A new table in `lab` is invisible to `sqliguard_lab` until a migration grants it explicitly, and only `SELECT` is ever granted.
 - Do not create functions, views or sequences in `lab` for the lab account to use unless that is separately approved. PostgreSQL grants EXECUTE on new functions to PUBLIC by default. The one approved exception is `lab.demo_password_matches()` (below).
-- "Reset demonstration data" re-seeds through `pgsql`, never through `lab`.
+- Re-seeding the demonstration data (`php artisan db:seed --class=LabDemoSeeder`) runs through `pgsql`, never through `lab`. There is no reset control in the application itself.
 - Demo migrations do nothing on non-PostgreSQL drivers. The in-memory SQLite test database has no `lab` schema, and demonstrations always query the real `lab` connection.
 
 Implemented in `2026_11_05_143215_create_lab_demo_tables`:
@@ -185,7 +193,21 @@ psql -U postgres -h 127.0.0.1 -d sqliguardDB -f database/provisioning/lab-harden
 | 3 | `CREATE SCHEMA lab AUTHORIZATION sqliguard_app`; `GRANT USAGE ON SCHEMA lab TO sqliguard_lab` | Dedicated demo schema that migrations can manage. The lab account can resolve names in it but cannot create anything |
 | 4 | `REVOKE USAGE ON SCHEMA public FROM PUBLIC`; explicit `GRANT USAGE, CREATE ON SCHEMA public TO sqliguard_app` | Keeps the lab account out of the application schema entirely. The app keeps its explicit grants |
 
-The script ends with read-only verification queries. `tests/Feature/LabConnectionBoundaryTest.php` checks the same state on every test run.
+**Read-only verification.** The script ends with one read-only check query, run inside a `READ ONLY` transaction that is rolled back. To run **only** the checks, without any of the `GRANT`/`REVOKE`/`ALTER` statements above, define `verify_only`:
+
+```sh
+psql -U postgres -h 127.0.0.1 -d sqliguardDB -v verify_only=1 -f database/provisioning/lab-hardening.sql
+```
+
+The checks read only system catalogs and the `has_*_privilege()` functions, so any account that can connect (`postgres` or `sqliguard_app`) can run them. The output lists each check as `PASS` or `FAIL` and ends with `ALL 27 CHECKS PASSED`. If any check fails, the statement raises an error that names every failed check (`VERIFICATION FAILED: …`), and psql stops with a nonzero exit status (`ON_ERROR_STOP`). The 27 checks cover:
+
+- `sqliguard_lab`: CONNECT but no TEMP, no elevated role attributes, no role memberships, `statement_timeout` = 5s
+- schemas: no USAGE or CREATE on `public` for the lab account; USAGE but no CREATE on `lab`; CREATE on both for `sqliguard_app`
+- `public.comparison_records`: exists, is owned by `sqliguard_app`, and the lab account holds no table, column or sequence (`comparison_records_id_seq`) privilege on it
+- every relation and sequence in `public`: no privilege for the lab account, and nothing in `public` or `lab` granted to PUBLIC
+- `lab`: the lab account's explicit table grants are exactly SELECT on the four `lab.demo_*` tables, with no write privilege, nothing on `lab.demo_account_credentials`, and EXECUTE on `lab.demo_password_matches(bigint, text)`
+
+`tests/Feature/LabConnectionBoundaryTest.php`, `tests/Feature/Database/LabDemoPrivilegesTest.php` and `tests/Feature/Database/ComparisonRecordsSchemaTest.php` check the same boundary on every test run (group `lab-database`).
 
 ### 4.4 Known limits
 
@@ -224,24 +246,31 @@ The script ends with read-only verification queries. `tests/Feature/LabConnectio
 
 ## 5. Roles and Feature Boundaries
 
-| Feature | Administrator (Instructor) | Student/Tester |
+Implemented capabilities:
+
+| Capability | Administrator (Instructor) | Student/Tester |
 | --- | :---: | :---: |
-| Manage application accounts | ✓ | |
-| Enable or disable Vulnerable Mode | ✓ | |
-| Reset demonstration data | ✓ | |
-| View all test records | ✓ | |
-| Dashboard summaries (Chart.js) | ✓ | |
-| Run SQL injection demonstrations | ✓ | ✓ |
-| Use normal or seeded sample inputs | ✓ | ✓ |
-| Compare Vulnerable and Secure Mode side by side | ✓ | ✓ |
-| View generated queries, results and explanations | ✓ | ✓ |
-| View personal test history | ✓ | ✓ |
+| Log in | ✓ | ✓ |
+| Run SQL injection demonstrations with own or predefined sample inputs | ✓ | ✓ |
+| View comparison results side by side: generated SQL, bound parameters, results, explanations and payload classification | ✓ | ✓ |
+| Manage application accounts: create, edit, set a new password, activate, deactivate (no delete) | ✓ | |
+| View personal comparison history (`/history`, own records only) | ✓ | ✓ |
+| View all users' comparison history (`/admin/history`) | ✓ | |
+
+Planned or out of scope (**not implemented**):
+
+| Capability | Status |
+| --- | --- |
+| Administrator switch to disable Vulnerable Mode | Planned. Vulnerable Mode is currently available whenever the environment is `local` (section 6) |
+| Resetting demonstration data from the application | Not implemented. The data is re-seeded with `php artisan db:seed --class=LabDemoSeeder` (section 4.2) |
+| Dashboard summaries (Chart.js) | Planned. Chart.js is installed but unused |
+| Exporting, deleting, purging or retention management of comparison history | Not implemented (section 10) |
 
 - The main demonstration interface always runs the **same input** through both modes and shows the results **side by side**. A single mode toggle must not replace this comparison.
-- The administrator's Vulnerable Mode switch only turns the vulnerable side on or off. It can never make Vulnerable Mode available outside the `local` environment. The switch is not built yet: Vulnerable Mode is currently available whenever the environment is `local`.
-- Demonstrations (`/demonstrations`) are shared by both roles through `role:administrator,student`. The role landing pages stay separate.
+- A future administrator Vulnerable Mode switch may only turn the vulnerable side off. It can never make Vulnerable Mode available outside the `local` environment.
+- Demonstrations (`/demonstrations`) and personal history (`/history`) are shared by both roles through `role:administrator,student`. The role landing pages stay separate.
 - Administrative operations are protected by authorization checks (policies or gates), not by hiding links.
-- Anything not in this table is out of scope unless approved.
+- Anything not in the implemented table is out of scope unless approved.
 
 ### 5.1 Role identifiers and account fields
 
@@ -292,8 +321,9 @@ Sessions, cache (including the login rate limiter) and queue use the `database` 
 | Layer | What it checks | Where |
 | --- | --- | --- |
 | `auth` | Logged in, otherwise redirect to `/login` | All routes except `/`, `/login`, `/up` |
-| `role:administrator` / `role:student` | The user's role, otherwise 403 | Route groups `admin.*` and `student.*` (`EnsureUserHasRole`) |
+| `role:administrator` / `role:student` / `role:administrator,student` | The user's role, otherwise 403 | Route groups `admin.*` and `student.*`; `demonstrations.*` and `history.*` for both roles (`EnsureUserHasRole`) |
 | `UserPolicy` | `viewAny`, `create`, `update` allowed only for administrators | Every `Admin\UserController` action, through `Gate::authorize()` or the Form Request's `authorize()` |
+| `ComparisonRecordPolicy` | `viewAny` both roles; `viewAll` administrators; `view` administrators or the record's owner, otherwise **404** (`Response::denyAsNotFound()`); `update` and `delete` always denied | `HistoryController` and `Admin\HistoryController`, through `Gate::authorize()` (section 10.5) |
 | Controller integrity checks | No self role change, no self deactivation, at least one active administrator | Inside a database transaction (section 5.4) |
 
 Role checks are centralized in `User::hasRole()` / `User::isAdministrator()`, which the middleware, policy and views all use. Hidden navigation links are a convenience only. Every route is checked server-side. Unauthorized requests get the Bootstrap 403 page (`resources/views/errors/403.blade.php`).
@@ -306,7 +336,7 @@ Role checks are centralized in `User::hasRole()` / `User::isAdministrator()`, wh
 | `GET /admin/users/create`, `POST /admin/users` | Create an account: name, email, role, password + confirmation. Created active |
 | `GET /admin/users/{user}/edit`, `PUT/PATCH /admin/users/{user}` | Edit name, email, role (not for one's own account) and optionally set a new password |
 | `PATCH /admin/users/{user}/activate` | Allow the account to log in |
-| `PATCH /admin/users/{user}/deactivate` | Block the account. There is no delete, so test history stays attributable |
+| `PATCH /admin/users/{user}/deactivate` | Block the account. There is no delete, so comparison history stays attributable. The database also refuses to delete an account that has history (`comparison_records.user_id` is `ON DELETE RESTRICT`) |
 
 Integrity rules:
 
@@ -340,7 +370,7 @@ No default or seeded administrator exists, and `DatabaseSeeder` creates no accou
 
 | Rule | How it is applied |
 | --- | --- |
-| Vulnerable Mode restricted to local development | `App\Demonstrations\VulnerableMode::isAvailable()` (`local` only), enforced server-side in both `DemonstrationRunner` and `VulnerableQueryExecutor`. The administrator switch (an additional condition) is a later phase |
+| Vulnerable Mode restricted to local development | `App\Demonstrations\VulnerableMode::isAvailable()` (`local` only), enforced server-side in both `DemonstrationRunner` and `VulnerableQueryExecutor`. An administrator switch (an additional, stricter condition) is planned but not implemented |
 | Visible warning when Vulnerable Mode is available | `<x-lab-warning />` in the base layout uses the same `VulnerableMode::isAvailable()` check |
 | No real credentials or user information in demos | Demo tables contain only fictitious data. The lab account cannot reach the `public` schema |
 | Fake demonstration datasets | Seeded through `pgsql` into the `lab` schema |
@@ -353,9 +383,11 @@ No default or seeded administrator exists, and `DatabaseSeeder` creates no accou
 | Secure Mode uses Query Builder or parameterized queries | Query Builder with bound parameters on the managed `lab` connection |
 | Raw PDO only for intentionally vulnerable demos | Only `App\Demonstrations\VulnerableQueryExecutor`, on an isolated throw-away `lab` connection (section 9.3) |
 | Escape user-generated content | Blade `{{ }}` everywhere. `{!! !!}` is never used for input, queries or results |
-| No credentials, stack traces or server errors exposed | `DemonstrationRunner` catches every database exception and maps its SQLSTATE to a fixed educational message. The raw message, which includes SQL, host, port and database, is never shown. Only unexpected errors are logged, with SQLSTATE, demonstration and mode, never the input. See also 6.1 |
-| Authorization on administrative operations | `role:administrator` route middleware plus `UserPolicy` on every account-management action |
-| Separate application and lab connections | `pgsql` vs `lab`, with different accounts and schemas |
+| No credentials, stack traces or server errors exposed | `DemonstrationRunner` catches every database exception and maps its SQLSTATE to a `DemonstrationErrorCategory`, which supplies a fixed educational message. The raw message, which includes SQL, host, port and database, is never shown or stored. Only unexpected errors are logged, with SQLSTATE, demonstration and mode, never the input. See also 6.1 |
+| Authorization on administrative operations | `role:administrator` route middleware plus `UserPolicy` on every account-management action, and `ComparisonRecordPolicy` (`viewAll`) on the all-users history |
+| Separate application and lab connections | `pgsql` vs `lab`, with different accounts and schemas. History is written only through `pgsql` |
+| Comparison history is metadata only | No input, SQL, parameters, rows, summaries, raw errors, IP addresses or user agents are stored (section 10.3) |
+| Classification is not a security control | The payload label never changes, blocks or authorizes execution (section 9.5). Protection comes from parameterized queries |
 | No weakening of database permissions | Permission changes are documented here and approved first |
 
 ### 6.1 `APP_DEBUG` and live demonstrations
@@ -400,6 +432,25 @@ No default or seeded administrator exists, and `DatabaseSeeder` creates no accou
   | † `tests/Feature/Demonstrations/VulnerableQueryExecutorTest.php` | Server-side prepare rejects two complete statements, stacked DROP fails, new connection per execution and never shared with Secure Mode, injected session settings do not persist, row cap, value truncation, refusal outside `local` |
   | † `tests/Feature/Database/LabDemoPrivilegesTest.php` | Connection accounts, SELECT on exactly the granted tables, no writes, no access to credentials, app owns everything, no default privileges, no CREATE. For the function: exact signature, `boolean` return type, owner, SECURITY DEFINER, STABLE, STRICT and pinned `search_path`; native PHP Boolean result without casting; exact EXECUTE grants (no PUBLIC, no grant option); the lab account can execute only this function; no other functions in `lab`; non-sample fake accounts reject guessable passwords |
   | `tests/Unit/Database/Seeders/LabDemoSeederTest.php` | Random fake passwords: 20 characters, contain a letter, a number and a symbol, are never repeated, and are never printed. The published sample is unchanged |
+- Validation, classification and history (Phase 4). † marks tests in group `lab-database`. History tests write only to the in-memory SQLite test database; the PostgreSQL tests read the system catalogs through the `lab` connection and never insert into `sqliguardDB`.
+
+  | Test | Covers |
+  | --- | --- |
+  | `tests/Feature/Http/Requests/RunDemonstrationRequestTest.php` | Required fields, 200-character limit, invalid UTF-8, control characters in every field, printable Unicode accepted, surrounding spaces kept exactly, other demonstrations' fields ignored, the trimming exemption limited to demonstration submissions, no old input flashed, JSON 422, plus † the exact submitted value reaching both modes |
+  | `tests/Feature/Http/Middleware/TrimStringsScopeTest.php` | Account-management input is still trimmed (the exemption applies only to demonstration submissions) |
+  | `tests/Unit/Demonstrations/Classification/PayloadClassifierTest.php` | Every rule, the precedence, normalization (case, whitespace, block comments), documented misses and false positives, invalid UTF-8, fixed explanations that never contain input, input never modified, every Phase 3 sample's label |
+  | `tests/Unit/Demonstrations/Classification/ClassificationTest.php` | Display rules come only from the allowlist and declared fields; attack-category detection |
+  | `tests/Feature/Http/Controllers/DemonstrationClassificationTest.php` | Classification panel next to the comparison, disclaimer, mismatch notes, forged explanations never shown, escaping, plus † every attack sample and real comparisons |
+  | `tests/Unit/Enums/DemonstrationErrorCategoryTest.php` | SQLSTATE → category mapping and the unchanged fixed messages |
+  | † `tests/Feature/Demonstrations/DemonstrationRunnerTest.php` | (Phase 4 additions) error category of every real failure type, per-mode durations, independent timing (statement timeout) |
+  | `tests/Feature/Models/ComparisonRecordTest.php` | History table columns, indexes and `ON DELETE RESTRICT` on SQLite, casts, rules stored as a JSON object, immutability, timestamp offset, factory states |
+  | † `tests/Feature/Database/ComparisonRecordsSchemaTest.php` | Column types, foreign key, indexes and all 19 CHECK constraints on PostgreSQL, evaluated read-only against valid and invalid rows, factory states and chains, and the recorder's real output |
+  | `tests/Unit/Demonstrations/ComparisonRecorderTest.php` | Field mapping, `results_differ` from `inputAlteredQuery()`, allowlist filtering of rule IDs, no sensitive values in the stored attributes |
+  | `tests/Feature/Demonstrations/ComparisonRecorderPersistenceTest.php` | One record per call, ownership, nulls for failed and refused modes, failed insert returns null and logs approved metadata only |
+  | `tests/Feature/Http/Controllers/DemonstrationHistoryRecordingTest.php` | Failure notice view, plus † one record per run, forged `user_id` ignored, each outcome, privacy markers absent from history and logs, failed insert still shows the comparison |
+  | `tests/Feature/Policies/ComparisonRecordPolicyTest.php` | `viewAny`, `viewAll`, `view` (404 status), `update`/`delete` denied |
+  | `tests/Feature/Http/Controllers/HistoryControllerTest.php` | Guest redirect, own-only lists, administrator list, 403/404, malformed IDs, no write methods, navigation, pagination and ordering, detail page for every outcome, malformed stored rules, escaping, no N+1 queries, time zone, plus † a real run viewed through every history page without input, SQL or rows |
+  | `tests/Feature/Http/Requests/ComparisonHistoryRequestTest.php` | Every filter alone and combined, inclusive dates in the application time zone, literal `%`/`_`/`\` user search, invalid filters (422), prohibited `user` on `/history` |
 
 ## 8. Phase Log
 
@@ -408,6 +459,7 @@ No default or seeded administrator exists, and `DatabaseSeeder` creates no accou
 | 1: Architecture and base setup | Complete | Bootstrap/Vite setup, base layout and warning, architecture docs, project rules, boundary tests, lab hardening and `lab` schema |
 | 2: Authentication and role management | Complete | Session login/logout with rate limiting, `Role` enum and `role`/`is_active` columns, role middleware and `UserPolicy`, administrator account management, `sqliguard:create-admin`, role landing pages |
 | 3: SQL injection demonstration engine | Complete | Tautology, UNION and comment demonstrations, side-by-side comparison, `lab` demo tables, seeder and narrow grants, isolated vulnerable executor, local-only enforcement |
+| 4: Validation, classification and history | Complete (pending final review) | Hardened demonstration input validation, rule-based payload classifier and classification panel, error categories and per-mode durations, metadata-only comparison history (table, model, recorder), personal and administrator history pages, read-only verify mode for `lab-hardening.sql`. No dashboard |
 
 ## 9. SQL Injection Demonstrations
 
@@ -422,20 +474,26 @@ Routes (`auth`, `auth.session`, `role:administrator,student`):
 | `POST /demonstrations/{demonstration}` | Run the comparison (`throttle:demonstrations`: 30 per minute per user) |
 
 1. The user picks a demonstration, enters input or chooses a sample, and submits **once**.
-2. `RunDemonstrationRequest` validates only that demonstration's own fields: string, at most 200 characters, no control characters. Attack strings are allowed on purpose. Classification is Phase 4.
-3. `DemonstrationRunner` runs **Vulnerable Mode first, then Secure Mode**, with the identical input array, on separate connections.
-4. The page shows the two panels side by side, Vulnerable on the left and Secure on the right, stacking on small screens. Each panel has:
-   - the mode name
-   - the SQL
-   - the bound parameters
-   - a status badge
-   - a one-line result summary
-   - the result rows
+2. `RunDemonstrationRequest` validates only that demonstration's own fields, with `bail`: required (the Tautology password is optional), a string, valid UTF-8 (checked first, because a `/u` pattern silently skips invalid UTF-8), no control characters (`\p{Cc}`, which includes tab, newline and carriage return), and at most 200 characters. Attack strings are allowed on purpose.
+   - The input is never altered: the `TrimStrings` middleware skips exactly these submissions, so surrounding spaces reach both modes unchanged.
+   - Rejected input is not flashed to the session (sessions are stored in the database), so the form is shown empty after an error. JSON requests get a normal 422.
+3. `DemonstrationRunner` runs **Vulnerable Mode first, then Secure Mode**, with the identical input array, on separate connections. Each mode's result (`ModeResult`) records its status (executed, failed or refused), rows, truncation (Vulnerable Mode only), a `DemonstrationErrorCategory` when it failed, and its duration in microseconds (`hrtime()`, monotonic; `null` when Vulnerable Mode is refused).
+4. `PayloadClassifier` then labels the same validated input (section 9.5). The label is computed after both modes have run and never influences them.
+5. The page shows, in this order:
+   - the comparison badge
+   - the input used for both modes
+   - the payload classification panel
+   - the two mode panels side by side, Vulnerable on the left and Secure on the right, stacking on small screens. Each panel has the mode name, the SQL, the bound parameters, a status badge, a one-line result summary and the result rows.
+   - an explanation of what happened in each mode, why they differ, and the security principle
+6. The comparison badge comes from `Comparison::inputAlteredQuery()`:
+   - "Input altered the vulnerable query" (`true`): Vulnerable Mode failed, or returned different rows from Secure Mode (compared order-insensitively)
+   - "Same behavior in both modes" (`false`): both executed and returned the same rows
+   - "Not compared" (`null`): Vulnerable Mode was refused, or it executed but Secure Mode did not
 
-   Below the panels, an explanation covers what happened in each mode, why they differ, and the security principle.
-5. "Input altered the vulnerable query" is shown when Vulnerable Mode failed to parse or returned different rows from Secure Mode. Secure Mode always treats the input as data, so it defines the intended behavior.
+   Secure Mode always treats the input as data, so it defines the intended behavior. The comparison is based on **returned rows**: an injection that changes the query's structure but returns the same rows (for example `x' AND 1=0 --` in the Comment demonstration) is reported as "Same behavior in both modes".
+7. `ComparisonRecorder` saves one metadata-only history record for the completed comparison (section 10). If saving fails, the page still shows the full comparison with the fixed notice "Comparison completed, but its history could not be saved. The results are still available on this page."
 
-Nothing is stored. The comparison is temporary response data. Logging and test history are Phase 4.
+The comparison itself (SQL, parameters and rows) is temporary response data and is never stored.
 
 ### 9.2 The three demonstrations
 
@@ -465,7 +523,7 @@ Results never include a password or digest. The credentials table is unreadable 
 | No arbitrary SQL endpoint | There is none. Only the three fixed templates exist, chosen by a route enum |
 | Bounded output | The generated SQL runs inside a fixed wrapper: `SELECT left(col::text, 200) AS col, … FROM (\n<generated>\n) AS demo_result(cols) LIMIT 51`. The line breaks stop an injected `--` from commenting out the wrapper. The column list enforces the expected shape, at most 50 rows are shown, and long values are cut server-side |
 | Least privilege | `sqliguard_lab`: SELECT on four fake tables, EXECUTE on one boolean function, nothing else (section 4) |
-| Safe errors | SQLSTATE is mapped to fixed messages (syntax, permission denied, timeout, read-only, undefined object, data error). Raw messages never leave the runner |
+| Safe errors | SQLSTATE is mapped once, by `DemonstrationErrorCategory::fromSqlState()`, to a category with a fixed message: `syntax_error` (42601), `permission_denied` (42501), `statement_timeout` (57014), `read_only_violation` (25006), `invalid_object_reference` (other 42xxx), `invalid_value` (22xxx) and `unexpected` (anything else). Raw messages never leave the runner. The SQLSTATE itself is never shown or stored; only `unexpected` errors are logged, with SQLSTATE, demonstration and mode |
 
 The page shows the generated SQL with the user's characters highlighted, and the full executed wrapper statement in a collapsible section. All output is escaped with Blade `{{ }}`. Secure Mode shows its SQL with `?` placeholders and lists the bound values separately. Values are never interpolated into the displayed statement.
 
@@ -477,3 +535,170 @@ The page shows the generated SQL with the user's characters highlighted, and the
 4. Log in as an Administrator or Student/Tester and open **Demonstrations**.
 
 For a live class, set `APP_DEBUG=false` (section 6.1). Demonstration errors are always shown as safe messages, regardless of `APP_DEBUG`.
+
+### 9.5 Payload classification (`PayloadClassifier`)
+
+`App\Demonstrations\Classification\PayloadClassifier` is a deterministic, rule-based **educational heuristic**. After both modes have run, it labels the same validated input so that students can compare the label with what actually happened. The result (`Classification`) is shown in the "Payload classification" panel on the comparison page and saved with the comparison history (section 10).
+
+> Classification is a heuristic teaching aid; Secure Mode is safe because of parameterization, not because of this label.
+
+The panel itself always shows this disclaimer:
+
+> "Payload classification is an educational, rule-based aid. It does not detect every SQL injection technique and is not a security boundary. Parameterized queries provide the primary protection against SQL injection."
+
+**What it does not do.** The classifier never alters, sanitizes, blocks or authorizes the input, and never decides whether or how a query runs. Validation (section 9.1) and both modes run exactly the same way whatever the label is. It does not replace server-side input validation or parameterized queries, and it is not a security control.
+
+**Rules.** Each field of the demonstration is checked separately, on private copies of the value: lowercased, with whitespace (including Unicode separators) collapsed, and with block comments both treated as a space and removed (so `UNION/**/SELECT` and `UN/**/ION` are recognized). The original input is never changed, and no part of it appears in the result.
+
+| Rule ID | Kind | Matches |
+| --- | --- | --- |
+| `union.select` | Attack: UNION | `UNION SELECT` or `UNION ALL SELECT` |
+| `tautology.equal_literals` | Attack: tautology | `OR` followed by two identical literals compared with `=`, such as `'1'='1`, `1=1`, `'a'='a`, including the form whose closing quote is supplied by the template |
+| `tautology.boolean_true` | Attack: tautology | `OR TRUE` or `OR NOT FALSE` |
+| `comment.line` | Attack: comment | `--` |
+| `comment.block` | Attack: comment | `/*` |
+| `signal.quote` | Supporting signal | An unescaped single quote (`''` pairs are ignored) |
+| `signal.statement_separator` | Supporting signal | `;` followed by one of the keywords below or `with`, `set`, `begin`, `commit` |
+| `signal.sql_keyword` | Supporting signal | A whole-word SQL keyword: `select`, `insert`, `update`, `delete`, `drop`, `truncate`, `alter`, `create`, `grant`, `revoke`, `copy`, `sleep`, `pg_sleep` |
+
+Each rule ID has one fixed explanation in `PayloadClassifier::EXPLANATIONS`. Explanations never contain or depend on the input, and only allowlisted rule IDs and texts are ever displayed.
+
+**Categories** (`App\Enums\PayloadCategory`):
+
+| Category | Assigned when |
+| --- | --- |
+| `normal` | No rule matched |
+| `unknown` | Only supporting signals matched (for example the quote in `O'Brien`), no attack rule |
+| `union`, `tautology`, `comment` | At least one attack rule matched. With mixed attack signals, the primary category follows the precedence **UNION, then tautology, then comment**. Every matched rule ID is still listed, grouped by field |
+
+The classifier version (`PayloadClassifier::VERSION`, currently 1) is shown with the label and stored with history, so stored labels can be told apart if the rules change.
+
+**Limitations.**
+
+1. It recognizes only the patterns covered by its predefined rules.
+2. It can miss attack variants that do not match those rules. Documented misses: `OR 2>1`, `OR 'a' LIKE 'a'`, `||` concatenation, dollar quoting, `E''` string escapes, `CHR()` construction, and keyword splitting beyond the block-comment handling above.
+3. It can label benign input as attack-like when the input happens to match a pattern. Documented false positives: `O'Brien` (`unknown`), `rock -- roll` (`comment`), and product names containing "union select" (`union`).
+4. `unknown` means that only supporting signals matched, not an attack rule. It does not prove that the input is safe.
+5. `normal` means that no rule matched. It is not a security guarantee.
+6. The classifier does not establish whether the submitted input actually altered a query.
+7. The comparison outcome (section 9.1, step 6) and the classifier label are different observations. When they disagree, the panel says so: a non-attack label next to an altered vulnerable query ("Pattern matching misses attacks; only parameterized queries prevent them"), or an attack-like label where both modes returned the same records ("This does not necessarily mean the classification was incorrect; the query may have changed without affecting the returned results").
+
+## 10. Demonstration History
+
+### 10.1 Overview
+
+| Item | Implementation |
+| --- | --- |
+| Table | `public.comparison_records` (migration `2026_11_23_171319_create_comparison_records_table`, corrected by `2026_11_23_174307_fix_comparison_records_vulnerable_truncated_check`) |
+| Model | `App\Models\ComparisonRecord`, owned by `User` (`User::comparisonRecords()`) |
+| Granularity | **One record per completed comparison**, holding both modes' outcomes, not one record per mode |
+| When | After both modes have run and the input has been classified (section 9.1, step 7), by `App\Demonstrations\ComparisonRecorder` |
+| Connection | The application connection `pgsql`. The lab account has no privilege on the table or its sequence (section 4.1) |
+| Immutability | Application-level: the model throws on update and delete, `ComparisonRecordPolicy` denies `update` and `delete`, and there are no write routes. There is no database trigger, so direct query-builder writes are not blocked |
+| Owner | `user_id` → `users.id` with `ON DELETE RESTRICT`. `user_id` is not mass assignable; it is set through the owner's relationship |
+| Retention | No purge, export or retention feature is implemented. Records stay until removed by a database administrator |
+
+### 10.2 Stored information
+
+| Stored information | Columns | Description |
+| --- | --- | --- |
+| Owner and timestamp | `user_id`, `created_at` (`timestamptz`) | Application user ID and comparison creation time. There is no `updated_at` |
+| Demonstration | `demonstration_type` | `tautology`, `union` or `comment` |
+| Classification | `classification_category`, `classification_rules` (`jsonb` object), `classifier_version` | Primary category, matched rule IDs grouped by the demonstration's declared field (for example `{"username": ["tautology.equal_literals", "signal.quote"]}`, `{}` when nothing matched), and the classifier version |
+| Mode statuses | `vulnerable_status`, `secure_status` | `executed`, `failed` or `refused` (Vulnerable Mode); `executed` or `failed` (Secure Mode) |
+| Row counts | `vulnerable_row_count`, `secure_row_count` | Number of returned rows (0–50) when the mode executed, otherwise `NULL` |
+| Truncation | `vulnerable_truncated` | Vulnerable Mode returned more than 50 rows and only the first 50 were kept. There is **no** Secure Mode truncation field |
+| Errors | `vulnerable_error_category`, `secure_error_category` | Mapped `DemonstrationErrorCategory` value when the mode failed, otherwise `NULL`. Never the SQLSTATE or the exception message |
+| Durations | `vulnerable_duration_us`, `secure_duration_us` | Execution attempt time in microseconds. `NULL` only for a refused Vulnerable Mode |
+| Comparison outcome | `results_differ` (nullable boolean) | The value of `Comparison::inputAlteredQuery()`, copied unchanged |
+
+**`results_differ`.** The column is `results_differ`, not `input_altered_query`. It holds exactly what `Comparison::inputAlteredQuery()` returned: `true` when Vulnerable Mode failed or returned different rows from Secure Mode, `false` when both executed and returned the same rows, and `NULL` when Vulnerable Mode was refused, or executed while Secure Mode failed. It compares **returned records**; it does not independently establish that the SQL structure changed (section 9.1, step 6).
+
+**Durations.** Vulnerable Mode's duration covers the whole attempt inside the executor: opening a new database connection, setting up its read-only transaction and timeout, and running the query. Secure Mode's covers resolving the managed `lab` connection (which connects on first use) and running the query. Durations are informational only and are **not** a performance benchmark of parameterized versus vulnerable queries.
+
+**Database constraints.** On PostgreSQL, 19 named `CHECK` constraints keep every record consistent: allowed values for type, category, statuses and error categories; `classification_rules` must be a JSON object; version ≥ 1; row counts 0–50 and durations ≥ 0; row count only when executed; error category only when failed; Vulnerable duration `NULL` only when refused; truncation only with exactly 50 rows (corrected to `IS NOT DISTINCT FROM 50` by the second migration); and `results_differ` consistent with the statuses, exactly as `inputAlteredQuery()` defines it. Constraints are not created on the SQLite test database; `tests/Feature/Database/ComparisonRecordsSchemaTest.php` evaluates them read-only on PostgreSQL. Indexes: `(user_id, created_at, id)` and `(created_at, id)`.
+
+### 10.3 Privacy and data minimization
+
+History records contain **structured comparison metadata only**. They never store:
+
+- submitted usernames, passwords, categories, teams or payloads
+- the raw submitted input or its length
+- generated or executed SQL
+- query bindings or parameters
+- returned database rows or result summaries
+- raw exception messages, SQLSTATE values or stack traces
+- IP addresses or user-agent strings
+
+Classification rule IDs are filtered against the `PayloadClassifier::EXPLANATIONS` allowlist and the demonstration's declared fields **when saved** (by the recorder) and **again when displayed** (by `ComparisonRecord::storedClassification()`). Explanation text is never stored; it is always read from the allowlist.
+
+**Failed insert.** If the history insert fails, the recorder returns `null` and the completed comparison is still displayed, with the fixed notice "Comparison completed, but its history could not be saved. The results are still available on this page." A warning is logged with the fixed message "Comparison history could not be saved." and only the demonstration type, the user ID and the SQLSTATE of the failed insert. The exception, the SQL, its bindings and the input are never logged.
+
+### 10.4 Recording (`ComparisonRecorder`)
+
+- Called by `DemonstrationController::run()` with the authenticated user, after the comparison and the classification are complete. It never changes either.
+- Creates the record through `$user->comparisonRecords()->create(…)`, so the owner never comes from request data.
+- Row counts exist only for executed modes, and Vulnerable truncation only for an executed Vulnerable Mode; unavailable values stay `NULL` and are never stored as 0 or `false`.
+- Catches database exceptions (`PDOException`, including `QueryException`) and returns `null` (section 10.3). No partial record is created: the insert is a single statement.
+- Every completed comparison creates exactly one record. Recording happens only through the demonstration run (`POST /demonstrations/{demonstration}`); there is no other way to create a record.
+
+### 10.5 Routes and authorization
+
+All history routes are `GET` routes in the `auth` + `auth.session` group, so guests are redirected to the login page and the inactive-account middleware (`EnsureAccountIsActive`) still applies.
+
+| Route | Name | Middleware | Access |
+| --- | --- | --- | --- |
+| `GET /history` | `history.index` | `role:administrator,student` | Both roles; **own records only** (the `ownedBy` scope), also for administrators |
+| `GET /history/{comparisonRecord}` | `history.show` | `role:administrator,student` | Administrator, or the record's owner. Anyone else gets **404**. The ID must be 1–18 digits, otherwise 404 |
+| `GET /admin/history` | `admin.history.index` | `role:administrator` | Administrators only; all users' records. Students get **403** |
+
+There are no history creation, update, delete, export or purge routes. `PUT`, `PATCH`, `DELETE` and `POST` on the history URLs return 404 or 405. Navigation shows **History** to both roles and **All History** to administrators, but hiding links is not authorization: every route is checked by middleware and `ComparisonRecordPolicy`.
+
+### 10.6 History lists
+
+`/history` ("My Comparison History") and `/admin/history` ("All Comparison History") share the same filters and table. The administrator list adds a User column (name, email and an "Inactive" badge), with owners eager-loaded to avoid N+1 queries.
+
+| Filter | Values | Effect |
+| --- | --- | --- |
+| `type` | `tautology`, `union`, `comment` | Demonstration type |
+| `category` | `normal`, `unknown`, `tautology`, `union`, `comment` | Classification category |
+| `vulnerable_status` | `executed`, `failed`, `refused` | Vulnerable Mode status |
+| `secure_status` | `executed`, `failed` | Secure Mode status |
+| `altered` | `yes`, `no`, `not_compared` | `results_differ` is `true`, `false` or `NULL` |
+| `from`, `to` | `Y-m-d`, with `to` on or after `from` | Whole calendar days in the application time zone (`app.timezone`), from the start of `from` through the end of `to` |
+| `user` | Up to 100 characters, **administrator list only** | Case-insensitive search in user names and email addresses. `%`, `_` and `\` are matched literally |
+
+- Filters are validated by `ComparisonHistoryRequest`, and only validated values are used. The `user` filter is **prohibited** on `/history`, so it can never widen a user's own history. Unsupported query parameters are ignored.
+- Invalid filters return **422** with a page listing the errors and a "Clear filters" link; nothing is flashed to the session.
+- 15 records per page, newest first (`created_at DESC`, then `id DESC`), with active filters kept in the pagination links.
+- Each row shows the date, demonstration, classification, each mode's status with its row count or error category, the outcome ("Different results", "Same results" or "Not compared") and a details link. Status and outcome are always written as text, never conveyed by colour alone.
+- Empty states distinguish "No comparisons have been recorded yet." from "No comparisons match these filters."
+- Both lists show the privacy statement: "Submitted inputs, generated SQL, query parameters, and returned database records are never stored in comparison history."
+
+### 10.7 Comparison detail page
+
+`/history/{comparisonRecord}` shows the saved metadata only:
+
+- **Header:** demonstration title and recording time in the application time zone. Administrators also see the owner's name and email; students never see owner details.
+- **Comparison outcome:** the `results_differ` label with its meaning, and the statement that it reflects the observed comparison outcome and does not independently prove whether the SQL query structure changed.
+- **Vulnerable Mode and Secure Mode cards:**
+  - status
+  - row count when executed. A truncated Vulnerable result is explained as "only the first 50 were kept for display", not as the total number of matching records.
+  - error category with its fixed message when failed
+  - duration in microseconds
+  - "Not available" or "Not measured (not run)" where values are `NULL`
+
+  The duration caveat is shown below the cards.
+- **Classification:** rebuilt from the stored category, rules and version by `ComparisonRecord::storedClassification()`. That method decodes the stored JSON without throwing, applies the allowlist again, and ignores malformed or forged entries. The page reuses the comparison page's classification panel, including its disclaimer, and notes when the stored classifier version differs from the current one.
+- **Links:** "Run this demonstration again" (opens the demonstration without any previous input), back to My Comparison History and, for administrators, back to All Comparison History.
+- The privacy statement is shown. SQLSTATE values, exception messages, SQL, bindings, input and rows are never displayed (none of them are stored).
+
+All dynamic output on the history pages is escaped with Blade `{{ }}`.
+
+### 10.8 Known limits
+
+- Immutability is enforced by the application, not the database. Bulk query-builder writes (`ComparisonRecord::query()->update()`, `->delete()`) or `DB::table()` would bypass it. No application code does this.
+- The rule-ID allowlist is applied by the application when saving and displaying. The database only checks that `classification_rules` is a JSON object.
+- `results_differ` is accepted as `false` even when the two stored row counts differ; its value comes from the row comparison, which the database cannot repeat.
+- On SQLite (tests only), date filters compare stored timestamp text, which is correct while timestamps are stored in UTC, as with the configured `app.timezone`. PostgreSQL compares real instants.
+- Each `POST` of a demonstration creates a record: resubmitting the form records another, real comparison (the 30-per-minute rate limit still applies).

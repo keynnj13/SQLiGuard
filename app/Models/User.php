@@ -10,6 +10,7 @@ use Illuminate\Database\Eloquent\Attributes\Hidden;
 use Illuminate\Database\Eloquent\Attributes\Scope;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 
@@ -59,6 +60,16 @@ class User extends Authenticatable
     public function isAdministrator(): bool
     {
         return $this->hasRole(Role::Administrator);
+    }
+
+    /**
+     * The demonstration comparisons this account has run.
+     *
+     * @return HasMany<ComparisonRecord, $this>
+     */
+    public function comparisonRecords(): HasMany
+    {
+        return $this->hasMany(ComparisonRecord::class);
     }
 
     /**

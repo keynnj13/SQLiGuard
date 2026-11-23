@@ -1,9 +1,11 @@
 <?php
 
+use App\Http\Controllers\Admin\HistoryController as AdminHistoryController;
 use App\Http\Controllers\Admin\UserController;
 use App\Http\Controllers\Auth\LoginController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\DemonstrationController;
+use App\Http\Controllers\HistoryController;
 use Illuminate\Support\Facades\Route;
 
 Route::view('/', 'welcome')->name('home');
@@ -30,6 +32,16 @@ Route::middleware(['auth', 'auth.session'])->group(function () {
             ->name('run');
     });
 
+    // Personal demonstration history (both roles). Read-only: there are no
+    // write routes. The ID is limited to digits within the bigint range, so
+    // anything else is a 404 rather than a database error.
+    Route::middleware('role:administrator,student')->prefix('history')->name('history.')->group(function () {
+        Route::get('/', [HistoryController::class, 'index'])->name('index');
+        Route::get('{comparisonRecord}', [HistoryController::class, 'show'])
+            ->where('comparisonRecord', '[0-9]{1,18}')
+            ->name('show');
+    });
+
     Route::middleware('role:student')->prefix('student')->name('student.')->group(function () {
         Route::view('dashboard', 'student.dashboard')->name('dashboard');
     });
@@ -40,5 +52,7 @@ Route::middleware(['auth', 'auth.session'])->group(function () {
         Route::resource('users', UserController::class)->except(['show', 'destroy']);
         Route::patch('users/{user}/activate', [UserController::class, 'activate'])->name('users.activate');
         Route::patch('users/{user}/deactivate', [UserController::class, 'deactivate'])->name('users.deactivate');
+
+        Route::get('history', [AdminHistoryController::class, 'index'])->name('history.index');
     });
 });

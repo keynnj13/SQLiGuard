@@ -39,7 +39,7 @@ class LabConnectionBoundaryTest extends TestCase
     {
         $tables = [
             'users', 'password_reset_tokens', 'sessions', 'cache', 'cache_locks',
-            'jobs', 'job_batches', 'failed_jobs', 'migrations',
+            'jobs', 'job_batches', 'failed_jobs', 'migrations', 'comparison_records',
         ];
 
         return array_combine($tables, array_map(fn (string $table): array => [$table], $tables));

@@ -5,6 +5,7 @@ namespace Tests\Feature\Demonstrations;
 use App\Demonstrations\Comparison;
 use App\Demonstrations\DemonstrationRunner;
 use App\Demonstrations\ModeResult;
+use App\Enums\DemonstrationErrorCategory;
 use App\Enums\DemonstrationType;
 use Database\Seeders\LabDemoSeeder;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -227,8 +228,80 @@ class DemonstrationRunnerTest extends TestCase
         $this->assertSame(ModeResult::REFUSED, $comparison->vulnerable->status);
         $this->assertSame([], $comparison->vulnerable->rows);
         $this->assertNull($comparison->vulnerable->connectionId);
+        $this->assertNull($comparison->vulnerable->errorCategory);
+        $this->assertNull($comparison->vulnerable->durationMicroseconds, 'A refused mode made no attempt, so it has no duration.');
         $this->assertSame(ModeResult::EXECUTED, $comparison->secure->status);
+        $this->assertNull($comparison->secure->errorCategory);
+        $this->assertIsInt($comparison->secure->durationMicroseconds);
+        $this->assertGreaterThanOrEqual(0, $comparison->secure->durationMicroseconds);
         $this->assertNull($comparison->inputAlteredQuery());
+    }
+
+    public function test_executed_modes_have_no_error_category_and_a_whole_microsecond_duration(): void
+    {
+        $comparison = $this->compare(DemonstrationType::Union, ['category' => 'stationery']);
+
+        foreach ([$comparison->vulnerable, $comparison->secure] as $result) {
+            $this->assertSame(ModeResult::EXECUTED, $result->status);
+            $this->assertNull($result->errorCategory);
+            $this->assertNull($result->message);
+            $this->assertIsInt($result->durationMicroseconds);
+            $this->assertGreaterThanOrEqual(0, $result->durationMicroseconds);
+        }
+    }
+
+    /**
+     * Real database errors, each raised by Vulnerable Mode in the UNION demonstration.
+     *
+     * @return array<string, array{string, DemonstrationErrorCategory}>
+     */
+    public static function failingInputs(): array
+    {
+        return [
+            'syntax error (42601)' => ["x' AND (", DemonstrationErrorCategory::SyntaxError],
+            'permission denied (42501)' => ["none' UNION SELECT id, name, email, 0 FROM public.users WHERE 'a'='a", DemonstrationErrorCategory::PermissionDenied],
+            'read-only violation (25006)' => ["none' UNION SELECT 0, lo_create(0)::text, 'x', 0 WHERE 'a'='a", DemonstrationErrorCategory::ReadOnlyViolation],
+            'undefined column (42703)' => ["x' AND no_such_column = 1 AND 'a'='a", DemonstrationErrorCategory::InvalidObjectReference],
+            'UNION type mismatch (42804)' => ["none' UNION SELECT now(), 'b', 'c', 0 WHERE 'a'='a", DemonstrationErrorCategory::InvalidObjectReference],
+            'invalid integer text (22P02)' => ["x' AND 'abc'::int = 1 AND 'a'='a", DemonstrationErrorCategory::InvalidValue],
+        ];
+    }
+
+    #[DataProvider('failingInputs')]
+    public function test_a_failed_mode_carries_its_category_the_unchanged_safe_message_and_its_duration(string $category, DemonstrationErrorCategory $expected): void
+    {
+        $comparison = $this->compare(DemonstrationType::Union, ['category' => $category]);
+        $vulnerable = $comparison->vulnerable;
+
+        $this->assertSame(ModeResult::FAILED, $vulnerable->status);
+        $this->assertSame($expected, $vulnerable->errorCategory);
+        $this->assertSame($expected->safeMessage(), $vulnerable->message);
+        $this->assertSame([], $vulnerable->rows);
+        $this->assertIsInt($vulnerable->durationMicroseconds);
+        $this->assertGreaterThanOrEqual(0, $vulnerable->durationMicroseconds);
+        $this->assertTrue($comparison->inputAlteredQuery());
+
+        $this->assertSame(ModeResult::EXECUTED, $comparison->secure->status);
+        $this->assertNull($comparison->secure->errorCategory);
+        $this->assertSame([], $comparison->secure->rows);
+    }
+
+    /**
+     * Takes about 5 seconds. The vulnerable attempt hits the statement timeout
+     * while Secure Mode, timed separately, stays far below it.
+     */
+    public function test_a_timed_out_query_is_categorized_and_each_mode_is_timed_independently(): void
+    {
+        $comparison = $this->compare(DemonstrationType::Union, ['category' => "none' UNION SELECT 0, pg_sleep(6)::text, 'x', 0 WHERE 'a'='a"]);
+
+        $this->assertSame(ModeResult::FAILED, $comparison->vulnerable->status);
+        $this->assertSame(DemonstrationErrorCategory::StatementTimeout, $comparison->vulnerable->errorCategory);
+        $this->assertSame('The query was cancelled by the 5-second statement timeout.', $comparison->vulnerable->message);
+        $this->assertGreaterThanOrEqual(5_000_000, $comparison->vulnerable->durationMicroseconds);
+        $this->assertLessThan(6_000_000, $comparison->vulnerable->durationMicroseconds, 'The 6-second sleep must have been cancelled at 5 seconds.');
+
+        $this->assertSame(ModeResult::EXECUTED, $comparison->secure->status);
+        $this->assertLessThan(5_000_000, $comparison->secure->durationMicroseconds, 'Secure Mode timing must not include the vulnerable attempt.');
     }
 
     public function test_database_error_messages_never_contain_internal_details(): void

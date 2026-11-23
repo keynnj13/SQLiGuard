@@ -2,6 +2,8 @@
 
 namespace App\Demonstrations;
 
+use App\Enums\DemonstrationErrorCategory;
+
 /**
  * The outcome of one mode (vulnerable or secure) for one comparison.
  * Temporary response data only; nothing is persisted in Phase 3.
@@ -24,6 +26,9 @@ final class ModeResult
      * @param  list<string|int|float|bool|null>  $bindings  bound parameter values (secure only)
      * @param  list<array<string, string|null>>  $rows
      * @param  int|null  $connectionId  PostgreSQL backend PID (diagnostics/tests only, never displayed)
+     * @param  DemonstrationErrorCategory|null  $errorCategory  set only when the mode failed; descriptive only
+     * @param  int|null  $durationMicroseconds  monotonic wall time of the execution attempt (connection and
+     *                                          query); null when no attempt was made (refused). Descriptive only.
      */
     public function __construct(
         public readonly string $mode,
@@ -37,6 +42,8 @@ final class ModeResult
         public readonly string $summary = '',
         public readonly ?string $message = null,
         public readonly ?int $connectionId = null,
+        public readonly ?DemonstrationErrorCategory $errorCategory = null,
+        public readonly ?int $durationMicroseconds = null,
     ) {}
 
     public function isVulnerable(): bool

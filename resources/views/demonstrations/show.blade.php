@@ -102,6 +102,12 @@
                 @endif
             </div>
 
+            @if (($historyRecorded ?? null) === false)
+                <div class="alert alert-warning py-2" role="status">
+                    Comparison completed, but its history could not be saved. The results are still available on this page.
+                </div>
+            @endif
+
             <div class="card mb-3">
                 <div class="card-body py-2 small">
                     <span class="fw-semibold">Input used for both modes:</span>
@@ -110,6 +116,10 @@
                     @endforeach
                 </div>
             </div>
+
+            @if ($classification)
+                @include('demonstrations.partials.classification', ['classification' => $classification, 'rules' => $classificationRules, 'altered' => $altered])
+            @endif
 
             <div class="row g-4 mb-4">
                 <div class="col-lg-6">

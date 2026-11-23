@@ -32,6 +32,20 @@
                                    @if (request()->routeIs('demonstrations.*')) aria-current="page" @endif
                                    href="{{ route('demonstrations.index') }}">Demonstrations</a>
                             </li>
+                            @can('viewAny', App\Models\ComparisonRecord::class)
+                                <li class="nav-item">
+                                    <a class="nav-link @if (request()->routeIs('history.*')) active @endif"
+                                       @if (request()->routeIs('history.*')) aria-current="page" @endif
+                                       href="{{ route('history.index') }}">History</a>
+                                </li>
+                            @endcan
+                            @can('viewAll', App\Models\ComparisonRecord::class)
+                                <li class="nav-item">
+                                    <a class="nav-link @if (request()->routeIs('admin.history.*')) active @endif"
+                                       @if (request()->routeIs('admin.history.*')) aria-current="page" @endif
+                                       href="{{ route('admin.history.index') }}">All History</a>
+                                </li>
+                            @endcan
                             @can('viewAny', App\Models\User::class)
                                 <li class="nav-item">
                                     <a class="nav-link @if (request()->routeIs('admin.users.*')) active @endif"

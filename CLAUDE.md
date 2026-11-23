@@ -44,7 +44,7 @@ SQLiGuard is a fourth-year BSIT project: a web input security demonstrator compa
 
   Never add an endpoint that accepts SQL, table, column or schema names. Demonstrations use fixed templates where input fills value positions only.
 - Secure Mode uses the Query Builder or bound parameters on the managed `lab` connection. A read-only account does not replace parameterization. Never interpolate bound values into the displayed secure SQL.
-- Map database errors to fixed messages (`DemonstrationRunner::safeErrorMessage()`). Never log demonstration input.
+- Map database errors to fixed messages through `App\Enums\DemonstrationErrorCategory`: `fromSqlState()` is the single SQLSTATE mapping and `safeMessage()` supplies the fixed message. Never log demonstration input.
 - Use Form Requests for all application input, policies or gates for administrative operations, and Laravel authentication with hashed passwords.
 - Escape output with `{{ }}`. Never use `{!! !!}` for user input, generated queries or query results.
 - Never show users database credentials, stack traces or raw exception messages. `QueryException` messages include host and database names, so show sanitized summaries instead.
